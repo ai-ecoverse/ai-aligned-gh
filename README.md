@@ -1,6 +1,6 @@
 # 🤖 AI-Aligned-GH: The Transparent GitHub CLI Wrapper for AI Attribution
 
-[![51% Vibe_Coded](https://img.shields.io/badge/51%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/trieloff/vibe-coded-badge-action)
+[![51% Vibe_Coded](https://img.shields.io/badge/51%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
 
 ![create_a_modern_m_image](https://github.com/user-attachments/assets/969463fc-4276-4ed1-8e20-6fee8aafeb3c)
 
@@ -20,14 +20,14 @@ AI-Aligned-GH is a transparent wrapper that:
 
 1. **Intercepts all `gh` calls** without requiring any changes to how AI tools work
 2. **Detects AI usage** through process tree analysis and environment variables
-3. **Exchanges tokens** via the [as-a-bot](https://github.com/trieloff/as-a-bot) service
+3. **Exchanges tokens** via the [as-a-bot](https://github.com/ai-ecoverse/as-a-bot) service
 4. **Ensures proper attribution** so AI actions show as "as-a-bot[bot] on behalf of @username"
 
 ## 🚀 Quick Install
 
 ```bash
 # One-line install
-curl -fsSL https://raw.githubusercontent.com/trieloff/ai-aligned-gh/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/ai-aligned-gh/main/install.sh | sh
 
 # Add to PATH (if needed)
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
@@ -236,7 +236,7 @@ gh api repos/OWNER/REPO/issues/NUMBER --jq '{
 }'
 
 # Example
-gh api repos/trieloff/ai-aligned-gh/issues/15 --jq '{
+gh api repos/ai-ecoverse/ai-aligned-gh/issues/15 --jq '{
   user: .user.login,
   app: .performed_via_github_app.slug
 }'
@@ -388,19 +388,19 @@ Apache 2.0 - See LICENSE file for details
 
 ## 🔗 Related Projects
 
-Part of the **[AI Ecoverse](https://github.com/trieloff/ai-ecoverse)** - a comprehensive ecosystem of tools for AI-assisted development:
+Part of the **[AI Ecoverse](https://github.com/ai-ecoverse/.github)** - a comprehensive ecosystem of tools for AI-assisted development:
 
-- [yolo](https://github.com/trieloff/yolo) - AI CLI launcher with worktree isolation
-- [am-i-ai](https://github.com/trieloff/am-i-ai) - Shared AI detection library (powers this tool)
-- [ai-aligned-git](https://github.com/trieloff/ai-aligned-git) - Git wrapper for safe AI commit practices
-- [vibe-coded-badge-action](https://github.com/trieloff/vibe-coded-badge-action) - Badge showing AI-generated code percentage
-- [gh-workflow-peek](https://github.com/trieloff/gh-workflow-peek) - Smarter GitHub Actions log filtering
-- [upskill](https://github.com/trieloff/upskill) - Install Claude/Agent skills from other repositories
-- [as-a-bot](https://github.com/trieloff/as-a-bot) - GitHub App token broker for proper AI attribution
+- [yolo](https://github.com/ai-ecoverse/yolo) - AI CLI launcher with worktree isolation
+- [am-i-ai](https://github.com/ai-ecoverse/am-i-ai) - Shared AI detection library (powers this tool)
+- [ai-aligned-git](https://github.com/ai-ecoverse/ai-aligned-git) - Git wrapper for safe AI commit practices
+- [vibe-coded-badge-action](https://github.com/ai-ecoverse/vibe-coded-badge-action) - Badge showing AI-generated code percentage
+- [gh-workflow-peek](https://github.com/ai-ecoverse/gh-workflow-peek) - Smarter GitHub Actions log filtering
+- [upskill](https://github.com/ai-ecoverse/gh-upskill) - Install Claude/Agent skills from other repositories
+- [as-a-bot](https://github.com/ai-ecoverse/as-a-bot) - GitHub App token broker for proper AI attribution
 
 ## 🙏 Acknowledgments
 
-This project is inspired by and follows the design philosophy of [ai-aligned-git](https://github.com/trieloff/ai-aligned-git) by @trieloff. The transparent wrapper pattern ensures AI tools don't need to be modified or trained to use special commands - they just work.
+This project is inspired by and follows the design philosophy of [ai-aligned-git](https://github.com/ai-ecoverse/ai-aligned-git) by @trieloff. The transparent wrapper pattern ensures AI tools don't need to be modified or trained to use special commands - they just work.
 
 ---
 

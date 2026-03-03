@@ -5,8 +5,8 @@
 # Supports both local installation and curl | sh
 #
 # Usage with curl:
-#   curl -fsSL https://raw.githubusercontent.com/trieloff/ai-aligned-gh/main/install.sh | sh
-#   UPGRADE=true curl -fsSL https://raw.githubusercontent.com/trieloff/ai-aligned-gh/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/ai-aligned-gh/main/install.sh | sh
+#   UPGRADE=true curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/ai-aligned-gh/main/install.sh | sh
 
 set -e
 
@@ -22,7 +22,7 @@ NC='\033[0m' # No Color
 INSTALL_DIR="$HOME/.local/bin"
 SCRIPT_NAME="gh"
 SOURCE_SCRIPT="executable_gh"
-RAW_BASE_URL="https://raw.githubusercontent.com/trieloff/ai-aligned-gh/main"
+RAW_BASE_URL="https://raw.githubusercontent.com/ai-ecoverse/ai-aligned-gh/main"
 
 # Verbose mode flag
 VERBOSE=${VERBOSE:-false}

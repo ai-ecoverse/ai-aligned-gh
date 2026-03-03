@@ -3,7 +3,7 @@
 # gh wrapper - Automatically detect AI tools and use bot token attribution via as-a-bot service
 # This wrapper intercepts gh CLI calls and exchanges tokens when AI usage is detected
 # Uses am-i-ai shared detection library
-# See: https://github.com/trieloff/am-i-ai
+# See: https://github.com/ai-ecoverse/am-i-ai
 
 # Configuration
 BROKER_URL="${AS_A_BOT_URL:-https://as-bot-worker.minivelos.workers.dev}"
@@ -19,7 +19,7 @@ debug_log() {
 
 # --- BEGIN BUNDLED am-i-ai ---
 # Bundled from am-i-ai v1.2.1
-# https://github.com/trieloff/am-i-ai
+# https://github.com/ai-ecoverse/am-i-ai
 #
 # This code is auto-generated. Do not edit manually.
 # To update, run the propagate-updates workflow in am-i-ai.
