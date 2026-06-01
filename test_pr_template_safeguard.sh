@@ -17,6 +17,7 @@ eval "$(extract_block pr_template_cache_file)"
 eval "$(extract_block pr_template_check_is_fresh)"
 eval "$(extract_block record_pr_template_check)"
 eval "$(extract_block extract_pr_template_repo_from_api_args)"
+eval "$(extract_block _gh_flag_takes_value)"
 eval "$(extract_block is_pr_create_invocation)"
 
 # Use an isolated cache dir for the tests.
@@ -85,16 +86,27 @@ assert_api_nomatch() {
 
 echo "=== is_pr_create_invocation() ==="
 assert_pr_create     "pr create"                               pr create
+assert_pr_create     "pr new (alias)"                          pr new
+assert_pr_create     "pr new --title T --body B"               pr new --title T --body B
 assert_pr_create     "pr create --title T --body B"            pr create --title T --body B
 assert_pr_create     "--repo o/r pr create"                    --repo o/r pr create
 assert_pr_create     "-R o/r pr create --fill"                 -R o/r pr create --fill
+assert_pr_create     "--repo=o/r pr create"                    --repo=o/r pr create
+assert_pr_create     "pr -R o/r create"                        pr -R o/r create
+assert_pr_create     "pr --repo o/r create"                    pr --repo o/r create
+assert_pr_create     "pr --repo=o/r create"                    pr --repo=o/r create
+assert_pr_create     "pr -R o/r new"                           pr -R o/r new
+assert_pr_create     "--config /tmp/cfg pr create"             --config /tmp/cfg pr create
+assert_pr_create     "--hostname gh.example pr create"         --hostname gh.example pr create
 assert_pr_create     "pr --some-flag create"                   pr --some-flag create
 assert_not_pr_create "pr list"                                 pr list
 assert_not_pr_create "pr view 123"                             pr view 123
 assert_not_pr_create "pr edit 1"                               pr edit 1
+assert_not_pr_create "pr review --approve"                     pr review --approve
 assert_not_pr_create "issue create"                            issue create
 assert_not_pr_create "api repos/o/r/pulls"                     api repos/o/r/pulls
 assert_not_pr_create "repo create new-repo"                    repo create new-repo
+assert_not_pr_create "pr -R o/r list"                          pr -R o/r list
 
 echo ""
 echo "=== extract_pr_template_repo_from_api_args() ==="
@@ -104,10 +116,15 @@ assert_api_match    "single file .md endpoint"             a   b       api repos
 assert_api_match    "specific template inside dir"         x   y       api repos/x/y/contents/.github/PULL_REQUEST_TEMPLATE/feature.md
 assert_api_match    "leading slash endpoint"               ai  gh-wrap api /repos/ai/gh-wrap/contents/.github/PULL_REQUEST_TEMPLATE
 assert_api_match    "endpoint after flags"                 o   r       api --jq .name repos/o/r/contents/.github/PULL_REQUEST_TEMPLATE
+assert_api_match    "endpoint with ?ref=main"              o   r       api "repos/o/r/contents/.github/PULL_REQUEST_TEMPLATE?ref=main"
+assert_api_match    "endpoint .md with ?ref=main"          a   b       api "repos/a/b/contents/.github/PULL_REQUEST_TEMPLATE.md?ref=main"
+assert_api_match    "endpoint dir trailing slash + query"  o   r       api "repos/o/r/contents/.github/PULL_REQUEST_TEMPLATE/?ref=feature"
+assert_api_match    "specific file with query"             x   y       api "repos/x/y/contents/.github/PULL_REQUEST_TEMPLATE/bug.md?ref=main"
 assert_api_nomatch  "unrelated repos endpoint"                         api repos/o/r/pulls
 assert_api_nomatch  "issue template path"                              api repos/o/r/contents/.github/ISSUE_TEMPLATE
 assert_api_nomatch  "graphql endpoint"                                 api graphql
 assert_api_nomatch  "non-api command"                                  pr list
+assert_api_nomatch  "look-alike with suffix"                           api repos/o/r/contents/.github/PULL_REQUEST_TEMPLATE_legacy
 
 echo ""
 echo "=== cache freshness ==="

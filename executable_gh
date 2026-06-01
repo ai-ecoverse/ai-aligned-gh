@@ -615,17 +615,25 @@ record_pr_template_check() {
 }
 
 # Inspect args for a `gh api` invocation and detect whether the endpoint
-# targets the PR template directory or file. Echoes "<owner> <repo>" and
-# returns 0 on match, 1 otherwise. Expects the full args list including
-# the leading "api" subcommand.
+# targets the PR template directory or file. Accepts:
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE/
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE.md
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE/<file>.md
+# All of the above may carry an optional ?query string (e.g. ?ref=main).
+# Echoes "<owner> <repo>" and returns 0 on match, 1 otherwise. Expects the
+# full args list including the leading "api" subcommand.
 extract_pr_template_repo_from_api_args() {
     local args=("$@")
     local n=${#args[@]}
     local i=1  # skip "api"
     while [ $i -lt $n ]; do
         local arg="${args[$i]}"
-        if [[ "$arg" =~ ^/?repos/([^/]+)/([^/]+)/contents/\.github/PULL_REQUEST_TEMPLATE(\.md)?/?$ ]] \
-           || [[ "$arg" =~ ^/?repos/([^/]+)/([^/]+)/contents/\.github/PULL_REQUEST_TEMPLATE/ ]]; then
+        # Strip any leading "/" and trailing "?query" to simplify matching.
+        local endpoint="${arg#/}"
+        endpoint="${endpoint%%\?*}"
+        if [[ "$endpoint" =~ ^repos/([^/]+)/([^/]+)/contents/\.github/PULL_REQUEST_TEMPLATE(\.md)?/?$ ]] \
+           || [[ "$endpoint" =~ ^repos/([^/]+)/([^/]+)/contents/\.github/PULL_REQUEST_TEMPLATE/[^/]+ ]]; then
             echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
             return 0
         fi
@@ -634,24 +642,49 @@ extract_pr_template_repo_from_api_args() {
     return 1
 }
 
-# Detect whether the args list represents `gh pr create` (the first
-# positional arg after global flags is "pr" followed by "create"). We
-# accept some leading global flags such as --repo/-R and --hostname.
+# Helper: return 0 if the given flag is known to take a value (so the next
+# token should also be skipped during subcommand resolution). Covers the
+# gh global flags (--hostname, --config) and the inherited / common flags
+# used by `gh pr create`/`gh pr new`. False positives here are harmless;
+# false negatives can let `pr create` slip past the safeguard.
+_gh_flag_takes_value() {
+    case "$1" in
+        --repo|-R|--hostname|--config| \
+        --base|-B|--head|-H| \
+        --title|-t|--body|-b|--body-file|-F| \
+        --label|-l|--assignee|-a|--milestone|-m|--project|-p| \
+        --reviewer|-r|--template|-T| \
+        --editor)
+            return 0 ;;
+    esac
+    return 1
+}
+
+# Detect whether the args list represents `gh pr create` (or its alias
+# `gh pr new`). Tolerates global flags before `pr`, inherited flags
+# between `pr` and the subcommand (notably `-R/--repo owner/repo`), and
+# both the `--flag value` and `--flag=value` forms. Returns 0 if the
+# invocation creates a pull request.
 is_pr_create_invocation() {
     local args=("$@")
     local n=${#args[@]}
     local i=0
     local found_pr=false
+
+    # Phase 1: locate the "pr" command, skipping any global flags.
     while [ $i -lt $n ]; do
         local arg="${args[$i]}"
         case "$arg" in
-            --repo|-R|--hostname)
-                i=$((i + 2)); continue ;;
-            --repo=*|--hostname=*)
+            --*=*|-[A-Za-z0-9]=*)
+                # Combined --flag=value or -X=value: skip just this token.
                 i=$((i + 1)); continue ;;
             -*)
-                # Unknown global flag — skip just this token to be safe.
-                i=$((i + 1)); continue ;;
+                if _gh_flag_takes_value "$arg"; then
+                    i=$((i + 2))
+                else
+                    i=$((i + 1))
+                fi
+                continue ;;
             pr)
                 found_pr=true
                 i=$((i + 1))
@@ -663,13 +696,25 @@ is_pr_create_invocation() {
     if ! $found_pr; then
         return 1
     fi
-    # Now look for "create" as the next positional, skipping leading flags.
+
+    # Phase 2: find the next positional subcommand, skipping inherited /
+    # subcommand-level flags (e.g. `pr -R o/r create`).
     while [ $i -lt $n ]; do
         local arg="${args[$i]}"
         case "$arg" in
-            -*) i=$((i + 1)); continue ;;
-            create) return 0 ;;
-            *) return 1 ;;
+            --*=*|-[A-Za-z0-9]=*)
+                i=$((i + 1)); continue ;;
+            -*)
+                if _gh_flag_takes_value "$arg"; then
+                    i=$((i + 2))
+                else
+                    i=$((i + 1))
+                fi
+                continue ;;
+            create|new)
+                return 0 ;;
+            *)
+                return 1 ;;
         esac
     done
     return 1

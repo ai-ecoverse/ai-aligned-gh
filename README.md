@@ -146,6 +146,63 @@ gh impersonate --remove someorg/somerepo
 
 This is an explicit opt-in — the wrapper will still fail loudly for repos not in the list, so you always know when attribution is missing.
 
+## 📝 Pull Request Template Safeguard
+
+When an AI tool is detected, the wrapper refuses `gh pr create` (and its `gh pr new` alias) until the agent has explicitly checked whether the target repository defines pull request templates. This nudges agents to discover and use existing PR templates instead of opening PRs with ad-hoc descriptions.
+
+### How the safeguard works
+
+1. The agent runs `gh pr create` for `owner/repo`.
+2. The wrapper looks for a recent "PR template check" cache entry for that repo. If none exists, it exits with code 1 and prints instructions.
+3. The agent runs `gh api repos/<owner>/<repo>/contents/.github/PULL_REQUEST_TEMPLATE` (or `.../PULL_REQUEST_TEMPLATE.md`, or a specific template path inside that directory).
+4. The wrapper observes the call, records a timestamp in `~/.cache/ai-aligned-gh/pr-template-checks/<owner>__<repo>`, and lets the underlying `gh api` request through unchanged.
+5. The next `gh pr create` for the same repo succeeds (up to the cache TTL).
+
+### What counts as a valid check
+
+Any `gh api` call whose endpoint matches one of:
+
+```
+repos/<owner>/<repo>/contents/.github/PULL_REQUEST_TEMPLATE
+repos/<owner>/<repo>/contents/.github/PULL_REQUEST_TEMPLATE/
+repos/<owner>/<repo>/contents/.github/PULL_REQUEST_TEMPLATE.md
+repos/<owner>/<repo>/contents/.github/PULL_REQUEST_TEMPLATE/<file>.md
+```
+
+A leading `/` and a trailing `?ref=...` query string are accepted. A 404 result from GitHub still counts: the agent has done the check, and the wrapper now knows it can let `pr create` through.
+
+### Cache behaviour
+
+- One cache entry per repository at `~/.cache/ai-aligned-gh/pr-template-checks/<owner>__<repo>`.
+- Default TTL is one hour (`PR_TEMPLATE_CACHE_TTL=3600`). Override the TTL by exporting `PR_TEMPLATE_CACHE_TTL` (seconds). Override the location by exporting `PR_TEMPLATE_CACHE_DIR`.
+- The safeguard is bypassed entirely when no AI tool is detected, so human use of `gh pr create` is unaffected.
+
+### Example flow
+
+```bash
+$ CLAUDE_CODE=1 gh pr create --title "Add feature" --body "..."
+
+=================================================================
+  PR Template Check Required
+=================================================================
+
+  AI tool detected: claude
+  Repository: ai-ecoverse/ai-aligned-gh
+
+  Before creating a pull request from an AI agent, you must
+  check whether this repository defines pull request templates.
+  Run:
+
+    gh api repos/ai-ecoverse/ai-aligned-gh/contents/.github/PULL_REQUEST_TEMPLATE
+  ...
+
+$ CLAUDE_CODE=1 gh api repos/ai-ecoverse/ai-aligned-gh/contents/.github/PULL_REQUEST_TEMPLATE
+# (response shows templates or 404 — either way the check is recorded)
+
+$ CLAUDE_CODE=1 gh pr create --title "Add feature" --body "..."
+# proceeds normally for the next hour
+```
+
 ## 🤖 Supported AI Tools
 
 The wrapper automatically detects:
@@ -177,6 +234,8 @@ The wrapper automatically detects:
 | `GH_AI_DEBUG` | Enable debug output | `false` |
 | `AS_A_BOT_URL` | as-a-bot service URL | `https://as-bot-worker.minivelos.workers.dev` |
 | `GH_TOKEN` | GitHub token override | (uses `gh auth token`) |
+| `PR_TEMPLATE_CACHE_TTL` | PR template check cache lifetime (seconds) | `3600` |
+| `PR_TEMPLATE_CACHE_DIR` | PR template check cache directory | `~/.cache/ai-aligned-gh/pr-template-checks` |
 
 ### PATH Configuration
 
