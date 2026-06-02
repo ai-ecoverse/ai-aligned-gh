@@ -1,6 +1,6 @@
 # 🤖 AI-Aligned-GH: The Transparent GitHub CLI Wrapper for AI Attribution
 
-[![65% Vibe_Coded](https://img.shields.io/badge/65%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
+[![71% Vibe_Coded](https://img.shields.io/badge/71%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
 
 ![create_a_modern_m_image](https://github.com/user-attachments/assets/969463fc-4276-4ed1-8e20-6fee8aafeb3c)
 
