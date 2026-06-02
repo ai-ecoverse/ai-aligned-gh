@@ -552,6 +552,175 @@ check_ps_tree() { ami_check_ps_tree; }
 detect_ai_tool() { ami_detect; }
 # --- END BUNDLED am-i-ai ---
 
+# --- BEGIN PR template safeguard ---
+# When an AI tool is in control and creates a pull request, ensure the agent
+# has first verified whether the repository has PR templates. We require a
+# `gh api repos/<owner>/<repo>/contents/.github/PULL_REQUEST_TEMPLATE[.md]`
+# call to have been observed by this wrapper within the last hour for the
+# target repo. The result of the check is cached per repository so that
+# repeat pr-create calls within the window do not require re-checking.
+
+PR_TEMPLATE_CACHE_DIR="${PR_TEMPLATE_CACHE_DIR:-$HOME/.cache/ai-aligned-gh/pr-template-checks}"
+PR_TEMPLATE_CACHE_TTL="${PR_TEMPLATE_CACHE_TTL:-3600}"
+
+pr_template_cache_file() {
+    local owner="$1"
+    local repo="$2"
+    # Sanitize: keep alnum, dot, dash, underscore. Use printf to avoid the
+    # trailing newline that `echo` would emit (which tr -c would also rewrite).
+    local safe_owner safe_repo
+    safe_owner=$(printf '%s' "$owner" | tr -c 'A-Za-z0-9._-' '_')
+    safe_repo=$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_')
+    echo "$PR_TEMPLATE_CACHE_DIR/${safe_owner}__${safe_repo}"
+}
+
+pr_template_check_is_fresh() {
+    local owner="$1"
+    local repo="$2"
+    local cache_file
+    cache_file=$(pr_template_cache_file "$owner" "$repo")
+
+    if [ ! -f "$cache_file" ]; then
+        return 1
+    fi
+
+    local mtime
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        mtime=$(stat -f %m "$cache_file" 2>/dev/null)
+    else
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null)
+    fi
+
+    if [ -z "$mtime" ]; then
+        return 1
+    fi
+
+    local now age
+    now=$(date +%s)
+    age=$((now - mtime))
+
+    if [ "$age" -lt "$PR_TEMPLATE_CACHE_TTL" ]; then
+        return 0
+    fi
+    return 1
+}
+
+record_pr_template_check() {
+    local owner="$1"
+    local repo="$2"
+    local cache_file
+    cache_file=$(pr_template_cache_file "$owner" "$repo")
+    mkdir -p "$PR_TEMPLATE_CACHE_DIR"
+    : > "$cache_file"
+}
+
+# Inspect args for a `gh api` invocation and detect whether the endpoint
+# targets the PR template directory or file. Accepts:
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE/
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE.md
+#   repos/<o>/<r>/contents/.github/PULL_REQUEST_TEMPLATE/<file>.md
+# All of the above may carry an optional ?query string (e.g. ?ref=main).
+# Echoes "<owner> <repo>" and returns 0 on match, 1 otherwise. Expects the
+# full args list including the leading "api" subcommand.
+extract_pr_template_repo_from_api_args() {
+    local args=("$@")
+    local n=${#args[@]}
+    local i=1  # skip "api"
+    while [ $i -lt $n ]; do
+        local arg="${args[$i]}"
+        # Strip any leading "/" and trailing "?query" to simplify matching.
+        local endpoint="${arg#/}"
+        endpoint="${endpoint%%\?*}"
+        if [[ "$endpoint" =~ ^repos/([^/]+)/([^/]+)/contents/\.github/PULL_REQUEST_TEMPLATE(\.md)?/?$ ]] \
+           || [[ "$endpoint" =~ ^repos/([^/]+)/([^/]+)/contents/\.github/PULL_REQUEST_TEMPLATE/[^/]+ ]]; then
+            echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Helper: return 0 if the given flag is known to take a value (so the next
+# token should also be skipped during subcommand resolution). Covers the
+# gh global flags (--hostname, --config) and the inherited / common flags
+# used by `gh pr create`/`gh pr new`. False positives here are harmless;
+# false negatives can let `pr create` slip past the safeguard.
+_gh_flag_takes_value() {
+    case "$1" in
+        --repo|-R|--hostname|--config| \
+        --base|-B|--head|-H| \
+        --title|-t|--body|-b|--body-file|-F| \
+        --label|-l|--assignee|-a|--milestone|-m|--project|-p| \
+        --reviewer|-r|--template|-T| \
+        --editor)
+            return 0 ;;
+    esac
+    return 1
+}
+
+# Detect whether the args list represents `gh pr create` (or its alias
+# `gh pr new`). Tolerates global flags before `pr`, inherited flags
+# between `pr` and the subcommand (notably `-R/--repo owner/repo`), and
+# both the `--flag value` and `--flag=value` forms. Returns 0 if the
+# invocation creates a pull request.
+is_pr_create_invocation() {
+    local args=("$@")
+    local n=${#args[@]}
+    local i=0
+    local found_pr=false
+
+    # Phase 1: locate the "pr" command, skipping any global flags.
+    while [ $i -lt $n ]; do
+        local arg="${args[$i]}"
+        case "$arg" in
+            --*=*|-[A-Za-z0-9]=*)
+                # Combined --flag=value or -X=value: skip just this token.
+                i=$((i + 1)); continue ;;
+            -*)
+                if _gh_flag_takes_value "$arg"; then
+                    i=$((i + 2))
+                else
+                    i=$((i + 1))
+                fi
+                continue ;;
+            pr)
+                found_pr=true
+                i=$((i + 1))
+                break ;;
+            *)
+                return 1 ;;
+        esac
+    done
+    if ! $found_pr; then
+        return 1
+    fi
+
+    # Phase 2: find the next positional subcommand, skipping inherited /
+    # subcommand-level flags (e.g. `pr -R o/r create`).
+    while [ $i -lt $n ]; do
+        local arg="${args[$i]}"
+        case "$arg" in
+            --*=*|-[A-Za-z0-9]=*)
+                i=$((i + 1)); continue ;;
+            -*)
+                if _gh_flag_takes_value "$arg"; then
+                    i=$((i + 2))
+                else
+                    i=$((i + 1))
+                fi
+                continue ;;
+            create|new)
+                return 0 ;;
+            *)
+                return 1 ;;
+        esac
+    done
+    return 1
+}
+# --- END PR template safeguard ---
+
 # Function to find the real gh executable
 find_real_gh() {
     # Common locations for gh
@@ -1265,6 +1434,55 @@ fi
 # AI detected - show info if in debug mode
 if [ "$DEBUG" = "true" ]; then
     echo "[INFO] AI detected: $AI_TOOL - checking for bot token exchange..." >&2
+fi
+
+# PR template safeguard: record check when agent inspects PR template path
+if [ "$1" = "api" ]; then
+    if read -r _ptl_owner _ptl_repo < <(extract_pr_template_repo_from_api_args "$@"); then
+        if [ -n "$_ptl_owner" ] && [ -n "$_ptl_repo" ]; then
+            record_pr_template_check "$_ptl_owner" "$_ptl_repo"
+            debug_log "Recorded PR template check for $_ptl_owner/$_ptl_repo"
+        fi
+    fi
+fi
+
+# PR template safeguard: block `gh pr create` until the agent has verified
+# whether the target repo has pull request templates. The check is cached
+# per repository for $PR_TEMPLATE_CACHE_TTL seconds (default: 1 hour).
+if is_pr_create_invocation "$@"; then
+    _ptc_repo_spec=""
+    _ptc_repo_spec=$(parse_repo_flag "$@") || _ptc_repo_spec=""
+    if read -r _ptc_owner _ptc_repo < <(get_repo_info "$_ptc_repo_spec"); then
+        if [ -n "$_ptc_owner" ] && [ -n "$_ptc_repo" ]; then
+            if ! pr_template_check_is_fresh "$_ptc_owner" "$_ptc_repo"; then
+                echo "" >&2
+                echo "=================================================================" >&2
+                echo "  PR Template Check Required" >&2
+                echo "=================================================================" >&2
+                echo "" >&2
+                echo "  AI tool detected: $AI_TOOL" >&2
+                echo "  Repository: $_ptc_owner/$_ptc_repo" >&2
+                echo "" >&2
+                echo "  Before creating a pull request from an AI agent, you must" >&2
+                echo "  check whether this repository defines pull request templates." >&2
+                echo "  Run:" >&2
+                echo "" >&2
+                echo "    gh api repos/$_ptc_owner/$_ptc_repo/contents/.github/PULL_REQUEST_TEMPLATE" >&2
+                echo "" >&2
+                echo "  If the directory exists, use one of the listed templates with" >&2
+                echo "  the --template flag when creating the PR. If it returns 404," >&2
+                echo "  also check for a single-file template:" >&2
+                echo "" >&2
+                echo "    gh api repos/$_ptc_owner/$_ptc_repo/contents/.github/PULL_REQUEST_TEMPLATE.md" >&2
+                echo "" >&2
+                echo "  After running either command, retry your pr create. This check" >&2
+                echo "  is cached per repository for $((PR_TEMPLATE_CACHE_TTL / 60)) minutes." >&2
+                echo "" >&2
+                exit 1
+            fi
+            debug_log "PR template check is fresh for $_ptc_owner/$_ptc_repo, allowing pr create"
+        fi
+    fi
 fi
 
 # Check if this is a safe operation that doesn't need token exchange
