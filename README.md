@@ -75,6 +75,20 @@ When an AI is detected and performing a write operation:
 
 Read-only operations (like `gh pr list`) skip token exchange for performance.
 
+### `gh auth token` returns the bot token
+
+When an AI tool runs `gh auth token`, the wrapper returns the **as-a-bot
+user-to-server token**, not your personal token. This closes the most common
+way agents bypass attribution: capturing the personal token from `gh auth
+token` and calling the GitHub API directly (e.g. `curl -H "Authorization: token
+<token>"`), which would record actions as you instead of as `as-a-bot[bot]`.
+Because the bot token is what comes back, that path now stays attributed.
+
+Humans are unaffected — when no AI tool is detected, `gh auth token` passes
+through to the real `gh` and returns your personal token as usual. If the bot
+token cannot be issued (app not yet authorized), the command fails closed rather
+than falling back to your personal token.
+
 ## 📋 Prerequisites
 
 1. **GitHub CLI**: Install from [cli.github.com](https://cli.github.com/)
@@ -236,6 +250,7 @@ The wrapper automatically detects:
 | `GH_TOKEN` | GitHub token override | (uses `gh auth token`) |
 | `PR_TEMPLATE_CACHE_TTL` | PR template check cache lifetime (seconds) | `3600` |
 | `PR_TEMPLATE_CACHE_DIR` | PR template check cache directory | `~/.cache/ai-aligned-gh/pr-template-checks` |
+| `AI_ALIGNED_GH_BIN` | Override path to the real `gh` (testing hook; unset in normal use) | (auto-detected) |
 
 ### PATH Configuration
 
