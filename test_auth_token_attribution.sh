@@ -36,6 +36,11 @@ PERSONAL_TOKEN="ghp_PERSONAL_TOKEN_SENTINEL"
 cat > "$FAKE_BIN/gh" <<EOF
 #!/bin/bash
 if [ "\$1" = "auth" ] && [ "\$2" = "token" ]; then
+    for a in "\$@"; do
+        case "\$a" in
+            -h|--help) echo "USAGE_HELP_TEXT"; exit 0 ;;
+        esac
+    done
     echo "$PERSONAL_TOKEN"
     exit 0
 fi
@@ -122,6 +127,22 @@ if echo "$out" | grep -q "$PERSONAL_TOKEN"; then
     fail "personal token leaked on the no-bot-token path"
 else
     pass "no personal token on stdout when failing closed"
+fi
+
+echo ""
+echo "--- AI + auth token --help: passes through to help, never a token ---"
+seed_bot_token
+out=$(run_ai auth token --help 2>/dev/null)
+rc=$?
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q "USAGE_HELP_TEXT"; then
+    pass "help flag shows usage, not a token"
+else
+    fail "expected usage text rc=0, got '$out' rc=$rc"
+fi
+if echo "$out" | grep -qE "$BOT_TOKEN|$PERSONAL_TOKEN"; then
+    fail "a token leaked on the --help path"
+else
+    pass "no token on the --help path"
 fi
 
 echo ""

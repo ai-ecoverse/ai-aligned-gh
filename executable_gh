@@ -1461,6 +1461,15 @@ fi
 # attributed to the bot. (Non-AI callers never reach this block — they passed
 # through to the real gh above and get their personal token unchanged.)
 if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    # Help requests don't expose a token — pass them straight through so
+    # `gh auth token --help` / `-h` still prints usage instead of a token.
+    for _arg in "$@"; do
+        case "$_arg" in
+            -h|--help)
+                exec "$GH_BIN" "$@"
+                ;;
+        esac
+    done
     debug_log "auth token requested by AI tool ($AI_TOOL) - issuing as-a-bot token, not personal token"
     BOT_TOKEN=$(get_cached_token)
     if [ -n "$BOT_TOKEN" ]; then
