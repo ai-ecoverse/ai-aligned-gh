@@ -89,6 +89,26 @@ through to the real `gh` and returns your personal token as usual. If the bot
 token cannot be issued (app not yet authorized), the command fails closed rather
 than falling back to your personal token.
 
+### Automatic token refresh
+
+GitHub App user-to-server tokens are short-lived (~8 hours). To avoid forcing a
+fresh browser-based device-flow login every time the token expires, the device
+flow also captures the **refresh token** (valid ~6 months) the as-a-bot broker
+returns. When the cached access token has expired, the wrapper silently renews
+it via the broker's `/user-token/refresh` endpoint before falling back to an
+interactive login:
+
+```
+expired access token → POST /user-token/refresh (broker holds the app secret)
+                      → new access + rotated refresh token → command proceeds
+```
+
+The refresh token grant requires the GitHub App's client secret, which only the
+broker ever holds — the wrapper sends just the refresh token. If the refresh
+token itself has expired (or the broker reports it invalid), the wrapper falls
+back to the normal device flow. Net effect: **authorize once, then stay logged
+in across token expiries** instead of re-authorizing every ~8 hours.
+
 ## 📋 Prerequisites
 
 1. **GitHub CLI**: Install from [cli.github.com](https://cli.github.com/)
@@ -266,7 +286,7 @@ which -a gh
 
 ## 🔒 Security
 
-- **No token storage**: Tokens are exchanged on-demand, never stored
+- **Local token cache only**: The bot access token and its refresh token are cached under `~/.cache/ai-aligned-gh/` with `0600` permissions so the short-lived access token can be renewed without re-authorizing. They never leave your machine except to the as-a-bot broker over HTTPS; the GitHub App client secret never touches the client.
 - **Preserves permissions**: Bot tokens have the same permissions as user tokens
 - **Transparent operation**: All actions are logged and auditable
 - **Fails safely**: If token exchange fails, falls back to normal operation

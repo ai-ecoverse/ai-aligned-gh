@@ -1063,13 +1063,22 @@ poll_for_token_background() {
             -H "Content-Type: application/json" \
             -d "{\"device_code\":\"${device_code}\"}" 2>/dev/null)
         
-        local access_token
+        local access_token refresh_token
         access_token=$(echo "$response" | jq -r '.access_token' 2>/dev/null)
-        
+        refresh_token=$(echo "$response" | jq -r '.refresh_token // empty' 2>/dev/null)
+
         if [ -n "$access_token" ] && [ "$access_token" != "null" ]; then
             # Save the token to cache
             echo "$access_token" > "$HOME/.cache/ai-aligned-gh/token"
             chmod 600 "$HOME/.cache/ai-aligned-gh/token"
+            # Persist the refresh token (when the broker provides one) so the
+            # short-lived (~8h) access token can be renewed silently instead of
+            # forcing a fresh interactive device-flow login. Older brokers that
+            # don't return one simply leave the user on the device-flow path.
+            if [ -n "$refresh_token" ] && [ "$refresh_token" != "null" ]; then
+                echo "$refresh_token" > "$HOME/.cache/ai-aligned-gh/refresh_token"
+                chmod 600 "$HOME/.cache/ai-aligned-gh/refresh_token"
+            fi
             echo "completed" > "${state_file}.status"
             rm -f "$state_file"
             break
@@ -1088,6 +1097,72 @@ poll_for_token_background() {
             break
         fi
     done
+}
+
+# Attempt to silently refresh an expired user-to-server token using the stored
+# refresh token. GitHub App user tokens expire after ~8h; refresh tokens last
+# ~6 months. On success, updates the cached access (and rotated refresh) token
+# and echoes the new access token. Returns non-zero when no refresh token is
+# available or the refresh fails (refresh token expired, broker without the
+# endpoint, network error), in which case the caller falls back to the
+# interactive device flow. This is what lets the user log in once per ~6 months
+# instead of re-authorizing every ~8 hours.
+try_refresh_token() {
+    local cache_dir="$HOME/.cache/ai-aligned-gh"
+    local refresh_file="$cache_dir/refresh_token"
+
+    if [ ! -f "$refresh_file" ]; then
+        debug_log "No refresh token stored, cannot refresh silently"
+        return 1
+    fi
+
+    local refresh_token
+    refresh_token=$(cat "$refresh_file")
+    if [ -z "$refresh_token" ]; then
+        return 1
+    fi
+
+    debug_log "Cached token expired; attempting silent refresh via broker"
+    local response
+    response=$(curl -sS -X POST "${BROKER_URL}/user-token/refresh" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"${refresh_token}\"}" 2>/dev/null)
+
+    if [ -z "$response" ]; then
+        debug_log "Refresh request returned no response"
+        return 1
+    fi
+
+    local new_access new_refresh err
+    new_access=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null)
+    new_refresh=$(echo "$response" | jq -r '.refresh_token // empty' 2>/dev/null)
+    err=$(echo "$response" | jq -r '.error // empty' 2>/dev/null)
+
+    if [ -z "$new_access" ] || [ "$new_access" = "null" ]; then
+        debug_log "Token refresh failed${err:+: $err} - falling back to device flow"
+        # Only discard the refresh token when GitHub says it is permanently
+        # invalid. Keep it for transient failures (network, broker missing the
+        # endpoint) so a later attempt can still succeed.
+        case "$err" in
+            bad_refresh_token|invalid_grant|unauthorized)
+                debug_log "Refresh token is no longer valid, removing it"
+                rm -f "$refresh_file"
+                ;;
+        esac
+        return 1
+    fi
+
+    mkdir -p "$cache_dir"
+    echo "$new_access" > "$cache_dir/token"
+    chmod 600 "$cache_dir/token"
+    # GitHub rotates the refresh token on each use; persist the new one.
+    if [ -n "$new_refresh" ] && [ "$new_refresh" != "null" ]; then
+        echo "$new_refresh" > "$refresh_file"
+        chmod 600 "$refresh_file"
+    fi
+    debug_log "Token refreshed successfully without interactive login"
+    echo "$new_access"
+    return 0
 }
 
 # Function to get or create cached token
@@ -1129,7 +1204,17 @@ get_cached_token() {
             rm -f "$cache_file"
         fi
     fi
-    
+
+    # The cached access token is missing or expired. Before falling back to an
+    # interactive device-flow login, try to renew it silently with the stored
+    # refresh token. This keeps AI agents unblocked across the ~8h token
+    # lifetime without a human re-authorizing in a browser.
+    local refreshed_token
+    if refreshed_token=$(try_refresh_token); then
+        echo "$refreshed_token"
+        return 0
+    fi
+
     # Check if there's an in-progress device flow
     if [ -f "$state_file" ]; then
         local state_age=$(($(date +%s) - $(stat -f %m "$state_file" 2>/dev/null || stat -c %Y "$state_file" 2>/dev/null)))
