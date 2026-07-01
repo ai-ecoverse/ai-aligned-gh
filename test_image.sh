@@ -265,6 +265,42 @@ else
 fi
 rm -f "$STATE/pending" "$STATE/workflow_args"
 
+# Runner that simulates an AI agent (Claude env var, no passthrough)
+run_ai() {
+    CLAUDECODE=1 \
+    AS_A_BOT_URL="https://broker.test" \
+    AI_ALIGNED_GH_BIN="$FAKEBIN/gh" \
+    PATH="$FAKEBIN:$PATH" \
+    "$GH_WRAPPER" "$@"
+}
+
+# Test 9: AI agents get a gh image tip on pr create
+print_test "gh pr create shows the gh image tip for AI agents"
+output=$(run_ai pr create --repo testowner/testrepo --title t --body b 2>&1 || true)
+if echo "$output" | grep -q "gh image <file>"; then
+    print_pass "pr create surfaced the gh image tip"
+else
+    print_fail "pr create did not surface the tip. Got: $output"
+fi
+
+# Test 10: AI agents get a gh image tip on issue create
+print_test "gh issue create shows the gh image tip for AI agents"
+output=$(run_ai issue create --repo testowner/testrepo --title t --body b 2>&1 || true)
+if echo "$output" | grep -q "gh image <file>"; then
+    print_pass "issue create surfaced the gh image tip"
+else
+    print_fail "issue create did not surface the tip. Got: $output"
+fi
+
+# Test 11: read-only commands do not get the tip
+print_test "gh pr list does not show the tip"
+output=$(run_ai pr list 2>&1 || true)
+if echo "$output" | grep -q "gh image <file>"; then
+    print_fail "pr list unexpectedly surfaced the tip. Got: $output"
+else
+    print_pass "pr list stayed quiet"
+fi
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
     echo -e "${GREEN}All gh image tests passed!${NC}"

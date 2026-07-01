@@ -174,6 +174,8 @@ gh pr comment 42 --body "Before/after: ![screenshot](https://.../i/owner/repo/<s
 
 Supported types: `png jpg jpeg gif webp svg avif mp4 mov webm`. Use `--repo owner/repo` outside a repository directory and `--timeout <seconds>` to adjust the wait (default 180s).
 
+To make the command discoverable at the moment it matters, the wrapper prints a short stderr tip pointing at `gh image` whenever an AI agent runs `gh pr create` or `gh issue create` — agents otherwise assume image attachment is impossible and skip screenshots entirely.
+
 ### How it works
 
 1. `gh image` computes the file's SHA-256 hash and dispatches the repo's `image-upload.yml` workflow with the hash and extension. **GitHub only lets users with write access dispatch workflows** — that's the authorization model: uploading requires the same permission as pushing code. Under an AI tool, the dispatch uses the as-a-bot token like every other write.

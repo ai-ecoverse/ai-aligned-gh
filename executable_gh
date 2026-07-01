@@ -661,18 +661,20 @@ _gh_flag_takes_value() {
     return 1
 }
 
-# Detect whether the args list represents `gh pr create` (or its alias
-# `gh pr new`). Tolerates global flags before `pr`, inherited flags
-# between `pr` and the subcommand (notably `-R/--repo owner/repo`), and
-# both the `--flag value` and `--flag=value` forms. Returns 0 if the
-# invocation creates a pull request.
-is_pr_create_invocation() {
+# Detect whether the args list represents `gh <cmd> create` (or its alias
+# `gh <cmd> new`) for the given command. Tolerates global flags before the
+# command, inherited flags between the command and the subcommand (notably
+# `-R/--repo owner/repo`), and both the `--flag value` and `--flag=value`
+# forms. Returns 0 if the invocation is a create.
+_is_create_invocation_for() {
+    local target_cmd="$1"
+    shift
     local args=("$@")
     local n=${#args[@]}
     local i=0
-    local found_pr=false
+    local found_cmd=false
 
-    # Phase 1: locate the "pr" command, skipping any global flags.
+    # Phase 1: locate the target command, skipping any global flags.
     while [ $i -lt $n ]; do
         local arg="${args[$i]}"
         case "$arg" in
@@ -686,15 +688,15 @@ is_pr_create_invocation() {
                     i=$((i + 1))
                 fi
                 continue ;;
-            pr)
-                found_pr=true
+            "$target_cmd")
+                found_cmd=true
                 i=$((i + 1))
                 break ;;
             *)
                 return 1 ;;
         esac
     done
-    if ! $found_pr; then
+    if ! $found_cmd; then
         return 1
     fi
 
@@ -719,6 +721,14 @@ is_pr_create_invocation() {
         esac
     done
     return 1
+}
+
+is_pr_create_invocation() {
+    _is_create_invocation_for pr "$@"
+}
+
+is_issue_create_invocation() {
+    _is_create_invocation_for issue "$@"
 }
 # --- END PR template safeguard ---
 
@@ -1831,6 +1841,19 @@ if [ "$1" = "api" ]; then
             debug_log "Recorded PR template check for $_ptl_owner/$_ptl_repo"
         fi
     fi
+fi
+
+# gh image hint: agents composing a PR or issue often want to include a
+# screenshot or recording but assume gh cannot attach images (cli/cli#12960).
+# Point them at gh image at exactly the moment it is useful. Informational
+# only — never blocks the command.
+if is_pr_create_invocation "$@" || is_issue_create_invocation "$@"; then
+    echo "" >&2
+    echo "[TIP] Need to include a screenshot, image, or video? Upload it first:" >&2
+    echo "        gh image <file>     # prints a URL, embed it as Markdown:" >&2
+    echo "        ![description](url)" >&2
+    echo "      Run 'gh image --help' for details." >&2
+    echo "" >&2
 fi
 
 # PR template safeguard: block `gh pr create` until the agent has verified
