@@ -177,15 +177,14 @@ Supported types: `png jpg jpeg gif webp svg avif mp4 mov webm`. Use `--repo owne
 ### How it works
 
 1. `gh image` computes the file's SHA-256 hash and dispatches the repo's `image-upload.yml` workflow with the hash and extension. **GitHub only lets users with write access dispatch workflows** — that's the authorization model: uploading requires the same permission as pushing code. Under an AI tool, the dispatch uses the as-a-bot token like every other write.
-2. The workflow pre-signs an R2 PUT URL that is **bound to the content hash** (the signature covers `x-amz-checksum-sha256`, so the URL physically cannot upload different content) and registers it with the as-a-bot worker, authenticated via GitHub Actions OIDC.
+2. The workflow is a secret-free relay: it proves the repository's identity to the as-a-bot worker via GitHub Actions OIDC. The worker mints an R2 PUT URL that is **bound to the content hash** (the signature covers `x-amz-checksum-sha256`, so the URL physically cannot upload different content).
 3. `gh image` polls the worker, uploads the file to the pre-signed URL, verifies it is serveable, and prints the URL (stdout carries only the URL, so agents can capture it).
 
-Storage is content-addressed (`owner/repo/<sha256>.<ext>`): re-uploading the same file returns the same URL instantly without dispatching anything, and a URL can never change content after publication.
+Storage is content-addressed (`owner/repo/<sha256>.<ext>`): re-uploading the same file returns the same URL instantly without dispatching anything, and a URL can never change content after publication. Uploads are kept for **90 days** — re-running `gh image` on the same file renews the same URL for another 90 days.
 
 ### Repository setup (one-time)
 
-1. Copy [`templates/image-upload.yml`](https://github.com/ai-ecoverse/as-a-bot/blob/main/templates/image-upload.yml) from as-a-bot to `.github/workflows/image-upload.yml`.
-2. Add Actions secrets: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (an R2 API token scoped to object writes on the bucket).
+Install the [as-a-bot GitHub App](https://github.com/apps/as-a-bot) on the repository. It commits the `image-upload.yml` workflow automatically — the repository needs **no secrets and no other configuration**.
 
 See the [full design document](https://github.com/ai-ecoverse/as-a-bot/blob/main/docs/image-upload-design.md) for the architecture and trust model.
 

@@ -796,15 +796,15 @@ SUPPORTED FILE TYPES
   $IMAGE_ALLOWED_EXTENSIONS
 
 SETUP (one-time, per repository)
-  1. Copy templates/image-upload.yml from
-     https://github.com/ai-ecoverse/as-a-bot
-     to .github/workflows/image-upload.yml
-  2. Add Actions secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+  Install the as-a-bot GitHub App: https://github.com/apps/as-a-bot
+  The app commits the image-upload workflow automatically — no secrets
+  or other configuration are needed in the repository.
 
 The upload is gated on repository write access: gh image dispatches the
 repo's image-upload workflow, and GitHub only lets collaborators with write
 access do that. Files are stored content-addressed (owner/repo/<sha256>.<ext>),
-so re-uploading the same file returns the same URL instantly.
+so re-uploading the same file returns the same URL instantly. Uploads are
+kept for 90 days; re-running gh image on the same file renews the URL.
 EOF
 }
 
@@ -970,11 +970,11 @@ handle_image_command() {
         echo "  repository, and you need write access to dispatch it." >&2
         echo "" >&2
         echo "  One-time setup for the repository:" >&2
-        echo "  1. Copy templates/image-upload.yml from" >&2
-        echo "     https://github.com/ai-ecoverse/as-a-bot" >&2
-        echo "     to .github/workflows/image-upload.yml" >&2
-        echo "  2. Add Actions secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID," >&2
-        echo "     R2_SECRET_ACCESS_KEY" >&2
+        echo "  Install the as-a-bot GitHub App on $owner/$repo:" >&2
+        echo "    https://github.com/apps/as-a-bot" >&2
+        echo "  The app commits the workflow automatically — no secrets needed." >&2
+        echo "  (Manual alternative: copy templates/image-upload.yml from" >&2
+        echo "  https://github.com/ai-ecoverse/as-a-bot to .github/workflows/)" >&2
         echo "" >&2
         echo "  Original error:" >&2
         echo "  $dispatch_output" >&2
