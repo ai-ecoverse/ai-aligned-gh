@@ -769,7 +769,7 @@ image_sha256_hex() {
 # Convert a hex digest to base64 (value of the x-amz-checksum-sha256 header
 # the pre-signed URL requires).
 image_hex_to_base64() {
-    if command -v xxd >/dev/null 2>&1; then
+    if command -v xxd >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then
         printf '%s' "$1" | xxd -r -p | base64 | tr -d '\n'
     elif command -v python3 >/dev/null 2>&1; then
         python3 -c 'import sys, base64, binascii; print(base64.b64encode(binascii.unhexlify(sys.argv[1])).decode())' "$1"
@@ -861,6 +861,19 @@ handle_image_command() {
 
     if [ -z "$file" ]; then
         image_usage >&2
+        exit 1
+    fi
+
+    # Timeout drives arithmetic comparisons below — reject anything that
+    # is not a positive integer before entering the polling loop.
+    case "$timeout" in
+        ''|*[!0-9]*)
+            echo "Error: --timeout must be a positive integer (got: '$timeout')" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$timeout" -le 0 ]; then
+        echo "Error: --timeout must be a positive integer (got: '$timeout')" >&2
         exit 1
     fi
 

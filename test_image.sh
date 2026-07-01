@@ -188,6 +188,27 @@ else
     fi
 fi
 
+# Test 5b: invalid --timeout values fail
+print_test "Invalid --timeout values fail"
+if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --timeout abc 2>&1); then
+    print_fail "Expected non-zero exit for --timeout abc"
+else
+    if echo "$output" | grep -q "positive integer"; then
+        print_pass "Non-numeric timeout rejected"
+    else
+        print_fail "Wrong error for non-numeric timeout. Got: $output"
+    fi
+fi
+if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --timeout 0 2>&1); then
+    print_fail "Expected non-zero exit for --timeout 0"
+else
+    if echo "$output" | grep -q "positive integer"; then
+        print_pass "Zero timeout rejected"
+    else
+        print_fail "Wrong error for zero timeout. Got: $output"
+    fi
+fi
+
 # Test 6: content-addressed dedupe returns URL without dispatching
 print_test "Dedupe: already-uploaded content returns URL immediately"
 touch "$STATE/head_ok"
