@@ -160,6 +160,35 @@ gh impersonate --remove someorg/somerepo
 
 This is an explicit opt-in — the wrapper will still fail loudly for repos not in the list, so you always know when attribution is missing.
 
+## 🖼️ Uploading Images (`gh image`)
+
+`gh` cannot attach images or videos to PRs and issues ([cli/cli#12960](https://github.com/cli/cli/issues/12960)) — a real limitation for coding agents that want to include screenshots or screen recordings. The wrapper adds a `gh image` subcommand that uploads a file to an R2 bucket via the [as-a-bot](https://github.com/ai-ecoverse/as-a-bot) image-upload flow and prints a stable URL you can embed in Markdown:
+
+```bash
+$ gh image screenshot.png
+https://as-bot-worker.minivelos.workers.dev/i/owner/repo/<sha256>.png
+
+# Then embed it:
+gh pr comment 42 --body "Before/after: ![screenshot](https://.../i/owner/repo/<sha256>.png)"
+```
+
+Supported types: `png jpg jpeg gif webp svg avif mp4 mov webm`. Use `--repo owner/repo` outside a repository directory and `--timeout <seconds>` to adjust the wait (default 180s).
+
+### How it works
+
+1. `gh image` computes the file's SHA-256 hash and dispatches the repo's `image-upload.yml` workflow with the hash and extension. **GitHub only lets users with write access dispatch workflows** — that's the authorization model: uploading requires the same permission as pushing code. Under an AI tool, the dispatch uses the as-a-bot token like every other write.
+2. The workflow pre-signs an R2 PUT URL that is **bound to the content hash** (the signature covers `x-amz-checksum-sha256`, so the URL physically cannot upload different content) and registers it with the as-a-bot worker, authenticated via GitHub Actions OIDC.
+3. `gh image` polls the worker, uploads the file to the pre-signed URL, verifies it is serveable, and prints the URL (stdout carries only the URL, so agents can capture it).
+
+Storage is content-addressed (`owner/repo/<sha256>.<ext>`): re-uploading the same file returns the same URL instantly without dispatching anything, and a URL can never change content after publication.
+
+### Repository setup (one-time)
+
+1. Copy [`templates/image-upload.yml`](https://github.com/ai-ecoverse/as-a-bot/blob/main/templates/image-upload.yml) from as-a-bot to `.github/workflows/image-upload.yml`.
+2. Add Actions secrets: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (an R2 API token scoped to object writes on the bucket).
+
+See the [full design document](https://github.com/ai-ecoverse/as-a-bot/blob/main/docs/image-upload-design.md) for the architecture and trust model.
+
 ## 📝 Pull Request Template Safeguard
 
 When an AI tool is detected, the wrapper refuses `gh pr create` (and its `gh pr new` alias) until the agent has explicitly checked whether the target repository defines pull request templates. This nudges agents to discover and use existing PR templates instead of opening PRs with ad-hoc descriptions.
@@ -250,6 +279,8 @@ The wrapper automatically detects:
 | `GH_TOKEN` | GitHub token override | (uses `gh auth token`) |
 | `PR_TEMPLATE_CACHE_TTL` | PR template check cache lifetime (seconds) | `3600` |
 | `PR_TEMPLATE_CACHE_DIR` | PR template check cache directory | `~/.cache/ai-aligned-gh/pr-template-checks` |
+| `GH_IMAGE_WORKFLOW` | Workflow file `gh image` dispatches | `image-upload.yml` |
+| `GH_IMAGE_TIMEOUT` | Default `gh image` wait for the upload URL (seconds) | `180` |
 | `AI_ALIGNED_GH_BIN` | Override path to the real `gh` (testing hook; unset in normal use) | (auto-detected) |
 
 ### PATH Configuration

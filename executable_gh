@@ -722,6 +722,324 @@ is_pr_create_invocation() {
 }
 # --- END PR template safeguard ---
 
+# --- BEGIN gh image ---
+# `gh image <file>` uploads an image or video to an R2 bucket via the
+# as-a-bot image-upload flow and prints a serveable URL that can be embedded
+# in PR and issue bodies. gh itself cannot attach images (cli/cli#12960).
+#
+# Flow (design: as-a-bot docs/image-upload-design.md):
+#   1. Compute the SHA-256 content hash of the file.
+#   2. Dispatch the target repo's image-upload workflow with hash + extension.
+#      GitHub only allows users with write access to dispatch workflows, so
+#      minting an upload URL requires the same permission as pushing code.
+#   3. The workflow pre-signs a checksum-bound R2 PUT URL and registers it
+#      with the as-a-bot worker.
+#   4. Poll the worker until the pre-signed URL appears, upload the file,
+#      verify it is serveable, and print the serve URL (stdout is only the
+#      URL, so agents can capture it directly).
+
+IMAGE_ALLOWED_EXTENSIONS="png jpg jpeg gif webp svg avif mp4 mov webm"
+IMAGE_WORKFLOW_FILE="${GH_IMAGE_WORKFLOW:-image-upload.yml}"
+
+image_content_type() {
+    case "$1" in
+        png)      echo "image/png" ;;
+        jpg|jpeg) echo "image/jpeg" ;;
+        gif)      echo "image/gif" ;;
+        webp)     echo "image/webp" ;;
+        svg)      echo "image/svg+xml" ;;
+        avif)     echo "image/avif" ;;
+        mp4)      echo "video/mp4" ;;
+        mov)      echo "video/quicktime" ;;
+        webm)     echo "video/webm" ;;
+        *)        echo "application/octet-stream" ;;
+    esac
+}
+
+image_sha256_hex() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# Convert a hex digest to base64 (value of the x-amz-checksum-sha256 header
+# the pre-signed URL requires).
+image_hex_to_base64() {
+    if command -v xxd >/dev/null 2>&1; then
+        printf '%s' "$1" | xxd -r -p | base64 | tr -d '\n'
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, base64, binascii; print(base64.b64encode(binascii.unhexlify(sys.argv[1])).decode())' "$1"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -MMIME::Base64 -e 'print encode_base64(pack("H*", $ARGV[0]), "")' "$1"
+    else
+        return 1
+    fi
+}
+
+image_usage() {
+    cat <<EOF
+Upload an image or video and print a serveable URL for PR/issue Markdown.
+
+USAGE
+  gh image <file> [flags]
+
+FLAGS
+  -R, --repo <owner/repo>   Target repository (default: current directory)
+      --timeout <seconds>   How long to wait for the upload URL (default: 180)
+  -h, --help                Show this help
+
+SUPPORTED FILE TYPES
+  $IMAGE_ALLOWED_EXTENSIONS
+
+SETUP (one-time, per repository)
+  1. Copy templates/image-upload.yml from
+     https://github.com/ai-ecoverse/as-a-bot
+     to .github/workflows/image-upload.yml
+  2. Add Actions secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+
+The upload is gated on repository write access: gh image dispatches the
+repo's image-upload workflow, and GitHub only lets collaborators with write
+access do that. Files are stored content-addressed (owner/repo/<sha256>.<ext>),
+so re-uploading the same file returns the same URL instantly.
+EOF
+}
+
+handle_image_command() {
+    local file="" repo_spec="" timeout="${GH_IMAGE_TIMEOUT:-180}"
+    local poll_interval=3
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                image_usage
+                exit 0
+                ;;
+            -R|--repo)
+                if [ $# -lt 2 ]; then
+                    echo "Error: $1 requires a value" >&2
+                    exit 1
+                fi
+                repo_spec="$2"
+                shift 2
+                ;;
+            --repo=*)
+                repo_spec="${1#--repo=}"
+                shift
+                ;;
+            --timeout)
+                if [ $# -lt 2 ]; then
+                    echo "Error: $1 requires a value" >&2
+                    exit 1
+                fi
+                timeout="$2"
+                shift 2
+                ;;
+            --timeout=*)
+                timeout="${1#--timeout=}"
+                shift
+                ;;
+            -*)
+                echo "Error: unknown flag: $1" >&2
+                echo "" >&2
+                image_usage >&2
+                exit 1
+                ;;
+            *)
+                if [ -n "$file" ]; then
+                    echo "Error: unexpected argument: $1" >&2
+                    exit 1
+                fi
+                file="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$file" ]; then
+        image_usage >&2
+        exit 1
+    fi
+
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+        echo "Error: file not found or not readable: $file" >&2
+        exit 1
+    fi
+
+    for tool in curl jq; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "Error: gh image requires '$tool' to be installed" >&2
+            exit 1
+        fi
+    done
+
+    local base ext
+    base=$(basename "$file")
+    case "$base" in
+        *.*)
+            ext=$(echo "${base##*.}" | tr '[:upper:]' '[:lower:]')
+            ;;
+        *)
+            echo "Error: file has no extension: $file" >&2
+            exit 1
+            ;;
+    esac
+    case " $IMAGE_ALLOWED_EXTENSIONS " in
+        *" $ext "*) ;;
+        *)
+            echo "Error: unsupported file type '.$ext'" >&2
+            echo "Supported: $IMAGE_ALLOWED_EXTENSIONS" >&2
+            exit 1
+            ;;
+    esac
+
+    local hash hash_b64
+    if ! hash=$(image_sha256_hex "$file"); then
+        echo "Error: gh image requires sha256sum or shasum" >&2
+        exit 1
+    fi
+    if ! hash_b64=$(image_hex_to_base64 "$hash"); then
+        echo "Error: gh image requires xxd, python3, or perl to encode the checksum" >&2
+        exit 1
+    fi
+
+    local owner repo
+    if ! read -r owner repo < <(get_repo_info "$repo_spec"); then
+        echo "Error: could not determine the target repository." >&2
+        echo "Run gh image inside a repository or pass --repo owner/repo." >&2
+        exit 1
+    fi
+
+    local serve_url="$BROKER_URL/i/$owner/$repo/$hash.$ext"
+
+    # Content-addressed dedupe: identical content is already served.
+    if curl -sfI "$serve_url" >/dev/null 2>&1; then
+        debug_log "Content already uploaded, returning existing URL"
+        echo "$serve_url"
+        exit 0
+    fi
+
+    # Use the as-a-bot token for the workflow dispatch when an AI tool is
+    # driving — the same attribution rules as every other write operation.
+    local dispatch_token=""
+    AI_TOOL=$(detect_ai_tool)
+    if [ "$AI_TOOL" != "none" ] && ! should_ignore_repo "$owner" "$repo"; then
+        dispatch_token=$(get_cached_token)
+        if [ -z "$dispatch_token" ]; then
+            echo "[ERROR] as-a-bot authentication required before dispatching the upload workflow." >&2
+            echo "        Authorize the app (see instructions above), then try again." >&2
+            exit 1
+        fi
+    fi
+
+    echo "Requesting upload URL via $IMAGE_WORKFLOW_FILE in $owner/$repo..." >&2
+    local dispatch_output dispatch_status
+    if [ -n "$dispatch_token" ]; then
+        dispatch_output=$(GH_TOKEN="$dispatch_token" "$GH_BIN" workflow run "$IMAGE_WORKFLOW_FILE" \
+            --repo "$owner/$repo" -f "hash=$hash" -f "ext=$ext" 2>&1)
+    else
+        dispatch_output=$("$GH_BIN" workflow run "$IMAGE_WORKFLOW_FILE" \
+            --repo "$owner/$repo" -f "hash=$hash" -f "ext=$ext" 2>&1)
+    fi
+    dispatch_status=$?
+    if [ $dispatch_status -ne 0 ]; then
+        echo "" >&2
+        echo "=================================================================" >&2
+        echo "  Image Upload Workflow Could Not Be Dispatched" >&2
+        echo "=================================================================" >&2
+        echo "" >&2
+        echo "  Repository: $owner/$repo" >&2
+        echo "" >&2
+        echo "  gh image needs the '$IMAGE_WORKFLOW_FILE' workflow in the target" >&2
+        echo "  repository, and you need write access to dispatch it." >&2
+        echo "" >&2
+        echo "  One-time setup for the repository:" >&2
+        echo "  1. Copy templates/image-upload.yml from" >&2
+        echo "     https://github.com/ai-ecoverse/as-a-bot" >&2
+        echo "     to .github/workflows/image-upload.yml" >&2
+        echo "  2. Add Actions secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID," >&2
+        echo "     R2_SECRET_ACCESS_KEY" >&2
+        echo "" >&2
+        echo "  Original error:" >&2
+        echo "  $dispatch_output" >&2
+        echo "" >&2
+        exit 1
+    fi
+
+    local status_url="$BROKER_URL/image-upload/status?owner=$owner&repo=$repo&hash=$hash&ext=$ext"
+    local start_time now elapsed response status upload_url
+    start_time=$(date +%s)
+    echo "Waiting for pre-signed upload URL (timeout: ${timeout}s)..." >&2
+
+    while true; do
+        response=$(curl -sS "$status_url" 2>/dev/null)
+        status=$(echo "$response" | jq -r '.status // empty' 2>/dev/null)
+
+        case "$status" in
+            uploaded)
+                # The identical content landed in the bucket already.
+                echo "$serve_url"
+                exit 0
+                ;;
+            ready)
+                break
+                ;;
+        esac
+
+        now=$(date +%s)
+        elapsed=$((now - start_time))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "" >&2
+            echo "Error: timed out after ${timeout}s waiting for the upload URL." >&2
+            echo "Check the workflow run:  gh run list --workflow $IMAGE_WORKFLOW_FILE --repo $owner/$repo" >&2
+            exit 1
+        fi
+        sleep "$poll_interval"
+    done
+
+    upload_url=$(echo "$response" | jq -r '.upload_url // empty')
+    if [ -z "$upload_url" ]; then
+        echo "Error: worker returned a ready status without an upload URL" >&2
+        exit 1
+    fi
+
+    # Send the headers the pre-signed URL was signed for (at minimum the
+    # checksum header that binds the upload to this exact content).
+    local -a header_args=()
+    local header_line
+    while IFS= read -r header_line; do
+        [ -n "$header_line" ] && header_args+=(-H "$header_line")
+    done < <(echo "$response" | jq -r '(.upload_headers // {}) | to_entries[] | "\(.key): \(.value)"' 2>/dev/null)
+    if [ ${#header_args[@]} -eq 0 ]; then
+        header_args=(-H "x-amz-checksum-sha256: $hash_b64")
+    fi
+    header_args+=(-H "Content-Type: $(image_content_type "$ext")")
+
+    echo "Uploading $base ($(wc -c < "$file" | tr -d ' ') bytes)..." >&2
+    if ! curl -sSf -X PUT --upload-file "$file" "${header_args[@]}" "$upload_url" -o /dev/null; then
+        echo "Error: upload failed (the pre-signed URL may have expired — try again)" >&2
+        exit 1
+    fi
+
+    # Verify the object is actually serveable before reporting success.
+    local verify_attempt=0
+    while ! curl -sfI "$serve_url" >/dev/null 2>&1; do
+        verify_attempt=$((verify_attempt + 1))
+        if [ "$verify_attempt" -ge 3 ]; then
+            echo "Error: upload completed but the file is not serveable at $serve_url" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+
+    echo "$serve_url"
+    exit 0
+}
+# --- END gh image ---
+
 # Function to find the real gh executable
 find_real_gh() {
     # Test/override hook: AI_ALIGNED_GH_BIN points at the real gh explicitly.
@@ -1433,6 +1751,13 @@ if [ "$1" = "impersonate" ]; then
     echo "instead of the as-a-bot app. Attribution will appear as you,"
     echo "not as a bot acting on your behalf."
     exit 0
+fi
+
+# Handle `gh image` subcommand — upload an image/video, print a serveable URL
+if [ "$1" = "image" ]; then
+    shift
+    handle_image_command "$@"
+    # handle_image_command always exits
 fi
 
 # Detect if an AI tool is running
