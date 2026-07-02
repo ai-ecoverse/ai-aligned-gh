@@ -790,6 +790,12 @@ image_hex_to_base64() {
     fi
 }
 
+# Escape HTML attribute metacharacters — the alt text derives from the
+# filename, which may contain ", <, >, or &.
+image_html_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
 # Print the final result: bare URL by default, ready-to-paste Markdown
 # with --markdown or an <img> tag with --html (so agents can inline it,
 # e.g. `gh pr comment 42 --body "see $(gh image --markdown shot.png)"`).
@@ -800,7 +806,7 @@ image_format_output() {
             echo "![${alt}](${url})"
             ;;
         html)
-            echo "<img src=\"${url}\" alt=\"${alt}\">"
+            echo "<img src=\"$(image_html_escape "$url")\" alt=\"$(image_html_escape "$alt")\">"
             ;;
         *)
             echo "$url"
@@ -856,10 +862,18 @@ handle_image_command() {
                 exit 0
                 ;;
             -m|--markdown)
+                if [ "$output_format" = "html" ]; then
+                    echo "Error: --markdown and --html are mutually exclusive" >&2
+                    exit 1
+                fi
                 output_format="markdown"
                 shift
                 ;;
             --html)
+                if [ "$output_format" = "markdown" ]; then
+                    echo "Error: --markdown and --html are mutually exclusive" >&2
+                    exit 1
+                fi
                 output_format="html"
                 shift
                 ;;
