@@ -790,6 +790,18 @@ image_hex_to_base64() {
     fi
 }
 
+# Print the final result: bare URL by default, ready-to-paste Markdown
+# with --markdown (so agents can inline it, e.g.
+# `gh pr comment 42 --body "see $(gh image --markdown shot.png)"`).
+image_format_output() {
+    local format="$1" alt="$2" url="$3"
+    if [ "$format" = "markdown" ]; then
+        echo "![${alt}](${url})"
+    else
+        echo "$url"
+    fi
+}
+
 image_usage() {
     cat <<EOF
 Upload an image or video and print a serveable URL for PR/issue Markdown.
@@ -800,7 +812,13 @@ USAGE
 FLAGS
   -R, --repo <owner/repo>   Target repository (default: current directory)
       --timeout <seconds>   How long to wait for the upload URL (default: 180)
+  -m, --markdown            Print ready-to-embed Markdown instead of the bare
+                            URL: ![<filename>](<url>)
   -h, --help                Show this help
+
+EXAMPLES
+  gh image screenshot.png
+  gh pr comment 42 --body "Before/after: \$(gh image --markdown after.png)"
 
 SUPPORTED FILE TYPES
   $IMAGE_ALLOWED_EXTENSIONS
@@ -821,12 +839,17 @@ EOF
 handle_image_command() {
     local file="" repo_spec="" timeout="${GH_IMAGE_TIMEOUT:-180}"
     local poll_interval=3
+    local output_format="url"
 
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help)
                 image_usage
                 exit 0
+                ;;
+            -m|--markdown)
+                output_format="markdown"
+                shift
                 ;;
             -R|--repo)
                 if [ $# -lt 2 ]; then
@@ -941,7 +964,7 @@ handle_image_command() {
     # Content-addressed dedupe: identical content is already served.
     if curl -sfI "$serve_url" >/dev/null 2>&1; then
         debug_log "Content already uploaded, returning existing URL"
-        echo "$serve_url"
+        image_format_output "$output_format" "${base%.*}" "$serve_url"
         exit 0
     fi
 
@@ -1004,7 +1027,7 @@ handle_image_command() {
         case "$status" in
             uploaded)
                 # The identical content landed in the bucket already.
-                echo "$serve_url"
+                image_format_output "$output_format" "${base%.*}" "$serve_url"
                 exit 0
                 ;;
             ready)
@@ -1058,7 +1081,7 @@ handle_image_command() {
         sleep 1
     done
 
-    echo "$serve_url"
+    image_format_output "$output_format" "${base%.*}" "$serve_url"
     exit 0
 }
 # --- END gh image ---

@@ -225,6 +225,17 @@ else
 fi
 rm -f "$STATE/head_ok"
 
+# Test 6b: --markdown emits ready-to-embed Markdown
+print_test "--markdown emits embeddable Markdown"
+touch "$STATE/head_ok"
+output=$(run_image "$TEST_FILE" --repo testowner/testrepo --markdown 2>/dev/null)
+if [ "$output" = "![shot]($SERVE_URL)" ]; then
+    print_pass "--markdown wrapped the URL in image Markdown"
+else
+    print_fail "--markdown output wrong. Expected: ![shot]($SERVE_URL) Got: $output"
+fi
+rm -f "$STATE/head_ok"
+
 # Test 7: full flow — dispatch, poll, upload, verify
 print_test "Full flow: dispatch, poll, upload, verify"
 printf '%s' "$HASH_B64" > "$STATE/checksum"
