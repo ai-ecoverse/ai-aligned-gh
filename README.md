@@ -166,22 +166,23 @@ This is an explicit opt-in — the wrapper will still fail loudly for repos not 
 
 ```bash
 $ gh image screenshot.png
-https://as-bot-worker.minivelos.workers.dev/i/owner/repo/<sha256>.png
+https://repo--owner.agentbin.net/<sha256>.png
 
 # Then embed it:
-gh pr comment 42 --body "Before/after: ![screenshot](https://.../i/owner/repo/<sha256>.png)"
+gh pr comment 42 --body "Before/after: ![screenshot](https://repo--owner.agentbin.net/<sha256>.png)"
 ```
 
 Supported types: `png jpg jpeg gif webp svg avif mp4 mov webm`. Use `--repo owner/repo` outside a repository directory and `--timeout <seconds>` to adjust the wait (default 180s).
 
-With `--markdown` (`-m`) the output is ready-to-embed Markdown instead of the bare URL, so it can be inlined directly:
+With `--markdown` (`-m`) the output is ready-to-embed Markdown, and with `--html` it is an `<img>` tag — either can be inlined directly:
 
 ```bash
 gh pr comment 42 --body "Before/after: $(gh image --markdown after.png)"
-# → Before/after: ![after](https://.../i/owner/repo/<sha256>.png)
-```
+# → Before/after: ![after](https://repo--owner.agentbin.net/<sha256>.png)
 
-> **Note**: GitHub's image proxy (Camo) refuses to inline images from `*.workers.dev` hosts — they render as plain links. For inline rendering in GitHub Markdown, the as-a-bot worker should be served from a custom domain.
+gh pr comment 42 --body "Before/after: $(gh image --html after.png)"
+# → Before/after: <img src="https://repo--owner.agentbin.net/<sha256>.png" alt="after">
+```
 
 To make the command discoverable at the moment it matters, the wrapper prints a short stderr tip pointing at `gh image` whenever an AI agent runs `gh pr create` or `gh issue create` — agents otherwise assume image attachment is impossible and skip screenshots entirely.
 

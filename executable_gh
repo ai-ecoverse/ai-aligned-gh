@@ -791,15 +791,21 @@ image_hex_to_base64() {
 }
 
 # Print the final result: bare URL by default, ready-to-paste Markdown
-# with --markdown (so agents can inline it, e.g.
-# `gh pr comment 42 --body "see $(gh image --markdown shot.png)"`).
+# with --markdown or an <img> tag with --html (so agents can inline it,
+# e.g. `gh pr comment 42 --body "see $(gh image --markdown shot.png)"`).
 image_format_output() {
     local format="$1" alt="$2" url="$3"
-    if [ "$format" = "markdown" ]; then
-        echo "![${alt}](${url})"
-    else
-        echo "$url"
-    fi
+    case "$format" in
+        markdown)
+            echo "![${alt}](${url})"
+            ;;
+        html)
+            echo "<img src=\"${url}\" alt=\"${alt}\">"
+            ;;
+        *)
+            echo "$url"
+            ;;
+    esac
 }
 
 image_usage() {
@@ -814,6 +820,8 @@ FLAGS
       --timeout <seconds>   How long to wait for the upload URL (default: 180)
   -m, --markdown            Print ready-to-embed Markdown instead of the bare
                             URL: ![<filename>](<url>)
+      --html                Print an HTML tag instead of the bare URL:
+                            <img src="<url>" alt="<filename>">
   -h, --help                Show this help
 
 EXAMPLES
@@ -849,6 +857,10 @@ handle_image_command() {
                 ;;
             -m|--markdown)
                 output_format="markdown"
+                shift
+                ;;
+            --html)
+                output_format="html"
                 shift
                 ;;
             -R|--repo)

@@ -238,6 +238,15 @@ if [ "$output" = "![shot]($SERVE_URL)" ]; then
 else
     print_fail "--markdown output wrong. Expected: ![shot]($SERVE_URL) Got: $output"
 fi
+
+# Test 6c: --html emits an <img> tag
+print_test "--html emits an <img> tag"
+output=$(run_image "$TEST_FILE" --repo testowner/testrepo --html 2>/dev/null)
+if [ "$output" = "<img src=\"$SERVE_URL\" alt=\"shot\">" ]; then
+    print_pass "--html wrapped the URL in an img tag"
+else
+    print_fail "--html output wrong. Got: $output"
+fi
 rm -f "$STATE/head_ok"
 
 # Test 7: full flow — dispatch, poll, upload, verify
