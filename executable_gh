@@ -1016,7 +1016,7 @@ handle_image_command() {
     fi
 
     local status_url="$BROKER_URL/image-upload/status?owner=$owner&repo=$repo&hash=$hash&ext=$ext"
-    local start_time now elapsed response status upload_url
+    local start_time now elapsed response status upload_url response_serve
     start_time=$(date +%s)
     echo "Waiting for pre-signed upload URL (timeout: ${timeout}s)..." >&2
 
@@ -1024,13 +1024,20 @@ handle_image_command() {
         response=$(curl -sS "$status_url" 2>/dev/null)
         status=$(echo "$response" | jq -r '.status // empty' 2>/dev/null)
 
+        # Prefer the worker's serve URL over the locally constructed one —
+        # it may live on the embeddable wildcard domain
+        # (repo--owner.<domain>) instead of the workers.dev host.
+        response_serve=$(echo "$response" | jq -r '.serve_url // empty' 2>/dev/null)
+
         case "$status" in
             uploaded)
                 # The identical content landed in the bucket already.
+                [ -n "$response_serve" ] && serve_url="$response_serve"
                 image_format_output "$output_format" "${base%.*}" "$serve_url"
                 exit 0
                 ;;
             ready)
+                [ -n "$response_serve" ] && serve_url="$response_serve"
                 break
                 ;;
         esac

@@ -68,7 +68,11 @@ case "$args" in
             echo '{"status":"pending"}'
         else
             checksum=$(cat "$FAKE_STATE/checksum" 2>/dev/null || echo "unset")
-            echo "{\"status\":\"ready\",\"upload_url\":\"https://acc.r2.cloudflarestorage.com/bucket/key?sig=1\",\"upload_headers\":{\"x-amz-checksum-sha256\":\"$checksum\"}}"
+            serve=""
+            if [ -f "$FAKE_STATE/serve_override" ]; then
+                serve=",\"serve_url\":\"$(cat "$FAKE_STATE/serve_override")\""
+            fi
+            echo "{\"status\":\"ready\",\"upload_url\":\"https://acc.r2.cloudflarestorage.com/bucket/key?sig=1\",\"upload_headers\":{\"x-amz-checksum-sha256\":\"$checksum\"}$serve}"
         fi
         exit 0
         ;;
@@ -261,6 +265,20 @@ else
     print_fail "Upload missing Content-Type header"
 fi
 rm -f "$STATE/workflow_args" "$STATE/put_args"
+
+# Test 7b: worker-provided serve_url (wildcard domain) wins over the
+# locally constructed one
+print_test "Worker serve_url override is preferred"
+WILDCARD_URL="https://testrepo--testowner.img.test/$HASH.png"
+printf '%s' "$WILDCARD_URL" > "$STATE/serve_override"
+printf '%s' "$HASH_B64" > "$STATE/checksum"
+output=$(run_image "$TEST_FILE" --repo testowner/testrepo 2>/dev/null)
+if [ "$output" = "$WILDCARD_URL" ]; then
+    print_pass "Printed the worker's wildcard serve URL"
+else
+    print_fail "Expected: $WILDCARD_URL Got: $output"
+fi
+rm -f "$STATE/serve_override" "$STATE/workflow_args" "$STATE/put_args"
 
 # Test 8: timeout when the worker never provides a URL
 print_test "Timeout when the offer never arrives"
