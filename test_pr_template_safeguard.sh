@@ -18,6 +18,7 @@ eval "$(extract_block pr_template_check_is_fresh)"
 eval "$(extract_block record_pr_template_check)"
 eval "$(extract_block extract_pr_template_repo_from_api_args)"
 eval "$(extract_block _gh_flag_takes_value)"
+eval "$(extract_block _is_create_invocation_for)"
 eval "$(extract_block is_pr_create_invocation)"
 
 # Use an isolated cache dir for the tests.
