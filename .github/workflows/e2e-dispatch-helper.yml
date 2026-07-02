@@ -1,0 +1,29 @@
+# TEMPORARY: helper for the gh image end-to-end test. The testing session
+# cannot call the workflow-dispatch API directly, so it commits
+# .github/e2e-image-request.json and this workflow relays the dispatch.
+# Remove after the test.
+name: E2E Dispatch Helper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/e2e-image-request.json
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Relay dispatch to image-upload.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          HASH=$(jq -r .hash .github/e2e-image-request.json)
+          EXT=$(jq -r .ext .github/e2e-image-request.json)
+          gh workflow run image-upload.yml --repo "$GITHUB_REPOSITORY" -f "hash=$HASH" -f "ext=$EXT"
