@@ -238,6 +238,39 @@ if [ "$output" = "![shot]($SERVE_URL)" ]; then
 else
     print_fail "--markdown output wrong. Expected: ![shot]($SERVE_URL) Got: $output"
 fi
+
+# Test 6c: --html emits an <img> tag
+print_test "--html emits an <img> tag"
+output=$(run_image "$TEST_FILE" --repo testowner/testrepo --html 2>/dev/null)
+if [ "$output" = "<img src=\"$SERVE_URL\" alt=\"shot\">" ]; then
+    print_pass "--html wrapped the URL in an img tag"
+else
+    print_fail "--html output wrong. Got: $output"
+fi
+
+# Test 6d: --html escapes attribute metacharacters in the alt text
+print_test "--html escapes filename-derived alt text"
+WEIRD_FILE="$WORK/we\"ird & <file>.png"
+cp "$TEST_FILE" "$WEIRD_FILE"
+output=$(run_image "$WEIRD_FILE" --repo testowner/testrepo --html 2>/dev/null)
+if echo "$output" | grep -qF 'alt="we&quot;ird &amp; &lt;file&gt;"'; then
+    print_pass "alt text is HTML-escaped"
+else
+    print_fail "alt text not escaped. Got: $output"
+fi
+rm -f "$WEIRD_FILE"
+
+# Test 6e: --markdown and --html are mutually exclusive
+print_test "--markdown and --html together fail"
+if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --markdown --html 2>&1); then
+    print_fail "Expected non-zero exit for conflicting format flags"
+else
+    if echo "$output" | grep -q "mutually exclusive"; then
+        print_pass "Conflicting format flags rejected"
+    else
+        print_fail "Wrong error for conflicting flags. Got: $output"
+    fi
+fi
 rm -f "$STATE/head_ok"
 
 # Test 7: full flow — dispatch, poll, upload, verify
