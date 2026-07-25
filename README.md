@@ -74,6 +74,10 @@ When an AI is detected and performing a write operation:
 4. Executes `gh` with the bot token
 
 Read-only operations (like `gh pr list`) skip token exchange for performance.
+This includes `gh api graphql` calls whose inline `query=` document is provably
+read-only (a `query`/`fragment` document with no `mutation` keyword). GraphQL
+documents that contain a mutation, come from a file or stdin (`-F query=@…`,
+`--input`), or use an explicit non-GET `--method` stay on the gated path.
 
 ### `gh auth token` returns the bot token
 

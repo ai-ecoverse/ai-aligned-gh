@@ -4,6 +4,7 @@
 
 # Extract the functions we need
 eval "$(sed -n '/^debug_log()/,/^}/p' executable_gh)"
+eval "$(sed -n '/^is_readonly_graphql_query()/,/^}/p' executable_gh)"
 eval "$(sed -n '/^is_safe_operation()/,/^}/p' executable_gh)"
 
 PASS=0
@@ -94,6 +95,59 @@ assert_unsafe "api /graphql"                                    api /graphql
 echo ""
 echo "--- API: explicit GET overrides body flags ---"
 assert_safe  "api --method GET -f key=val repos/owner/repo"   api --method GET -f key=val repos/owner/repo
+
+# --- Read-only GraphQL carve-out ---
+echo ""
+echo "--- API: read-only graphql queries are safe ---"
+assert_safe  "graphql named query with variables" \
+    api graphql -f 'query=query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){pullRequest(number:1){body}}}' -f owner=foo -f repo=bar
+assert_safe  "graphql anonymous query shorthand" \
+    api graphql -f 'query={viewer{login}}'
+assert_safe  "graphql fragment-first document" \
+    api graphql -f 'query=fragment F on User{login} query{viewer{...F}}'
+assert_safe  "graphql query with leading whitespace" \
+    api graphql -f 'query=  query{viewer{login}}'
+assert_safe  "graphql query via --raw-field" \
+    api graphql --raw-field 'query=query{viewer{login}}'
+assert_safe  "graphql query via --field= form" \
+    api graphql '--field=query=query{viewer{login}}'
+assert_safe  "graphql query with -F typed variable" \
+    api graphql -f 'query=query($n:Int!){viewer{login}}' -F n=5
+assert_safe  "graphql query with --hostname" \
+    api graphql -f 'query=query{viewer{login}}' --hostname github.com
+assert_safe  "/graphql endpoint with read-only query" \
+    api /graphql -f 'query=query{viewer{login}}'
+
+echo ""
+echo "--- API: graphql writes and uninspectable documents stay unsafe ---"
+assert_unsafe "graphql mutation" \
+    api graphql -f 'query=mutation{addStar(input:{starrableId:"x"}){clientMutationId}}'
+assert_unsafe "graphql multi-operation document with mutation" \
+    api graphql -f 'query=query A{viewer{login}} mutation B{addStar(input:{starrableId:"x"}){clientMutationId}}'
+assert_unsafe "graphql uppercase MUTATION" \
+    api graphql -f 'query=MUTATION{x}'
+assert_unsafe "graphql repeated query= fields, one a mutation" \
+    api graphql -f 'query=query{viewer{login}}' -f 'query=mutation{x}'
+assert_unsafe "graphql query from file" \
+    api graphql -F 'query=@query.graphql'
+assert_unsafe "graphql query from stdin" \
+    api graphql -F 'query=@-'
+assert_unsafe "graphql with --input body" \
+    api graphql -f 'query=query{viewer{login}}' --input body.json
+assert_unsafe "graphql subscription" \
+    api graphql -f 'query=subscription{x}'
+assert_unsafe "graphql without query document" \
+    api graphql -f owner=foo
+assert_unsafe "graphql explicit POST stays gated" \
+    api graphql --method POST -f 'query=query{viewer{login}}'
+assert_unsafe "REST endpoint with query-shaped field is not graphql" \
+    api repos/owner/repo/issues -f 'query=query{viewer{login}}'
+
+echo ""
+echo "--- API: = forms of body flags imply POST ---"
+assert_unsafe "api --field=key=val"  api '--field=title=hi' repos/owner/repo
+assert_unsafe "api --raw-field=key=val" api '--raw-field=body=hi' repos/owner/repo
+assert_unsafe "api --input=file"     api '--input=file.json' repos/owner/repo
 
 # --- Summary ---
 echo ""

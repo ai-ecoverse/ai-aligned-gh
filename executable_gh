@@ -1192,6 +1192,39 @@ parse_repo_flag() {
     return 1
 }
 
+# Check whether an inline GraphQL document is read-only. GraphQL can only
+# write through a `mutation` operation, so a document that never mentions the
+# keyword cannot mutate anything — regardless of which operation an
+# operationName variable selects. Fails closed on anything it cannot inspect:
+# empty/missing documents and @file / @- (stdin) references.
+is_readonly_graphql_query() {
+    local doc="$1"
+
+    # Strip leading whitespace
+    doc="${doc#"${doc%%[![:space:]]*}"}"
+
+    case "$doc" in
+        ""|@*|-*)
+            return 1
+            ;;
+    esac
+
+    # Case-insensitive substring match. A false positive (e.g. a field name
+    # containing "mutation") just falls back to the gated path.
+    if printf '%s' "$doc" | grep -qi "mutation"; then
+        return 1
+    fi
+
+    # Require a query operation, a fragment definition, or the anonymous
+    # query shorthand "{...}".
+    case "$doc" in
+        query*|fragment*|\{*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # Function to check if operation is safe (read-only)
 is_safe_operation() {
     local cmd="$1"
@@ -1268,9 +1301,13 @@ is_safe_operation() {
             # - Supports --method/--method=/-X/-X= (case-insensitive)
             # - graphql endpoint defaults to POST
             # - Body flags (-f, -F, --field, --raw-field, --input) imply POST
+            # - Exception: a graphql call whose inline query= document is
+            #   provably read-only (no mutation) is safe despite body flags
             local method=""
             local has_body_flag=false
             local has_graphql=false
+            local has_input=false
+            local graphql_query=""
             local -a api_args=("$@")
             local i=0
             # Skip past the "api" command itself (index 0 in api_args is $1=cmd="api")
@@ -1292,8 +1329,30 @@ is_safe_operation() {
                         # Concatenated form: -XPOST, -XGET, etc.
                         method="${arg#-X}"
                         ;;
-                    -f|-F|--field|--raw-field|--input)
+                    -f|-F|--field|--raw-field)
                         has_body_flag=true
+                        # Capture inline GraphQL documents (-f query=...) so the
+                        # read-only carve-out below can inspect them. Repeated
+                        # query= fields are concatenated so the mutation check
+                        # covers every candidate document, not just the last.
+                        if [ $((i + 1)) -lt ${#api_args[@]} ]; then
+                            case "${api_args[$((i + 1))]}" in
+                                query=*)
+                                    graphql_query="$graphql_query ${api_args[$((i + 1))]#query=}"
+                                    ;;
+                            esac
+                        fi
+                        ;;
+                    --field=query=*|--raw-field=query=*)
+                        has_body_flag=true
+                        graphql_query="$graphql_query ${arg#*=query=}"
+                        ;;
+                    --field=*|--raw-field=*)
+                        has_body_flag=true
+                        ;;
+                    --input|--input=*)
+                        has_body_flag=true
+                        has_input=true
                         ;;
                     graphql|/graphql)
                         has_graphql=true
@@ -1310,7 +1369,15 @@ is_safe_operation() {
                 fi
                 return 1
             fi
-            # No explicit method: check implicit POST triggers
+            # No explicit method: a graphql call whose inline query document
+            # is provably read-only cannot write, even though it travels over
+            # POST — the -f/-F flags only carry the query and its variables.
+            # --input (body from file/stdin) is uninspectable, so it stays
+            # gated.
+            if $has_graphql && ! $has_input && is_readonly_graphql_query "$graphql_query"; then
+                return 0
+            fi
+            # Check implicit POST triggers
             if $has_graphql || $has_body_flag; then
                 return 1
             fi
