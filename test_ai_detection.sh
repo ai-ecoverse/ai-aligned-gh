@@ -5,12 +5,11 @@
 # Set debug mode
 export DEBUG=true
 
-# Extract just the functions we need from executable_gh
+# Extract just the functions we need from executable_gh. The detection
+# functions live in the bundled am-i-ai section (ami_* plus the
+# backward-compatibility aliases), so pull in that whole block.
 eval "$(sed -n '/^debug_log()/,/^}/p' executable_gh)"
-eval "$(sed -n '/^process_contains()/,/^}/p' executable_gh)"
-eval "$(sed -n '/^check_env_vars()/,/^}/p' executable_gh)"
-eval "$(sed -n '/^check_ps_tree()/,/^}/p' executable_gh)"
-eval "$(sed -n '/^detect_ai_tool()/,/^}/p' executable_gh)"
+eval "$(sed -n '/^# --- BEGIN BUNDLED am-i-ai ---$/,/^# --- END BUNDLED am-i-ai ---$/p' executable_gh)"
 
 echo "=== AI Detection Test for ai-aligned-gh ==="
 echo "Current PID: $$"
