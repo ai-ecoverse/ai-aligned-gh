@@ -260,7 +260,35 @@ else
 fi
 rm -f "$WEIRD_FILE"
 
-# Test 6e: --markdown and --html are mutually exclusive
+# Tests 6e-6f: every video type uses labelled links, never media markup
+for video_ext in mp4 mov webm; do
+    VIDEO_FILE="$WORK/demo.$video_ext"
+    VIDEO_URL="https://broker.test/i/testowner/testrepo/$HASH.$video_ext"
+    cp "$TEST_FILE" "$VIDEO_FILE"
+
+    print_test "Video .$video_ext --markdown emits a labelled link"
+    output=$(run_image "$VIDEO_FILE" --repo testowner/testrepo --markdown 2>/dev/null)
+    if [ "$output" = "[demo.$video_ext]($VIDEO_URL)" ]; then
+        print_pass "Video .$video_ext --markdown emitted a labelled link"
+    else
+        print_fail "Video .$video_ext --markdown output wrong. Got: $output"
+    fi
+
+    print_test "Video .$video_ext --html emits a labelled anchor"
+    output=$(run_image "$VIDEO_FILE" --repo testowner/testrepo --html 2>/dev/null)
+    if [ "$output" = "<a href=\"$VIDEO_URL\">demo.$video_ext</a>" ]; then
+        print_pass "Video .$video_ext --html emitted a labelled anchor"
+    else
+        print_fail "Video .$video_ext --html output wrong. Got: $output"
+    fi
+    if echo "$output" | grep -Eq '<(img|video)( |>)'; then
+        print_fail "Video .$video_ext --html emitted media markup. Got: $output"
+    else
+        print_pass "Video .$video_ext --html avoided stripped or broken media markup"
+    fi
+done
+
+# Test 6g: --markdown and --html are mutually exclusive
 print_test "--markdown and --html together fail"
 if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --markdown --html 2>&1); then
     print_fail "Expected non-zero exit for conflicting format flags"

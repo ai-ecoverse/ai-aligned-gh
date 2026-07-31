@@ -178,7 +178,7 @@ gh pr comment 42 --body "Before/after: ![screenshot](https://repo--owner.agentbi
 
 Supported types: `png jpg jpeg gif webp svg avif mp4 mov webm`. Use `--repo owner/repo` outside a repository directory and `--timeout <seconds>` to adjust the wait (default 180s).
 
-With `--markdown` (`-m`) the output is ready-to-embed Markdown, and with `--html` it is an `<img>` tag — either can be inlined directly:
+With `--markdown` (`-m`) the output is ready-to-embed markup, and with `--html` it is an HTML tag. Images use image markup; videos use labelled links because GitHub rejects externally hosted video through its image proxy and strips external `<video>` elements. The default bare-URL output is unchanged:
 
 ```bash
 gh pr comment 42 --body "Before/after: $(gh image --markdown after.png)"
@@ -186,6 +186,13 @@ gh pr comment 42 --body "Before/after: $(gh image --markdown after.png)"
 
 gh pr comment 42 --body "Before/after: $(gh image --html after.png)"
 # → Before/after: <img src="https://repo--owner.agentbin.net/<sha256>.png" alt="after">
+
+# Video output stays clickable instead of producing broken image markup
+gh image --markdown demo.mp4
+# → [demo.mp4](https://repo--owner.agentbin.net/<sha256>.mp4)
+
+gh image --html demo.mp4
+# → <a href="https://repo--owner.agentbin.net/<sha256>.mp4">demo.mp4</a>
 ```
 
 To make the command discoverable at the moment it matters, the wrapper prints a short stderr tip pointing at `gh image` whenever an AI agent runs `gh pr create` or `gh issue create` — agents otherwise assume image attachment is impossible and skip screenshots entirely.
