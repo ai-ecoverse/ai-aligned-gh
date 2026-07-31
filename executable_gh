@@ -1316,6 +1316,45 @@ is_safe_operation() {
         extension)
             return 0
             ;;
+        stack)
+            # Stacked pull requests (github/gh-stack, public preview 2026-07-30).
+            #
+            # This is an extension, so it would otherwise take the "unknown
+            # command = extension dispatch" fast path below. That path's
+            # assumption — that the extension's own gh calls get evaluated
+            # independently — does not hold here: gh-stack is a Go binary that
+            # builds its own go-gh API client and creates PRs, repoints PR
+            # bases, marks PRs ready for review, forms stacks, and merges
+            # entirely over GraphQL/REST. It never shells out to
+            # `gh pr create`, so those writes are never re-examined here.
+            #
+            # go-gh resolves its token as GH_TOKEN > GITHUB_TOKEN >
+            # hosts.yml oauth_token > shelling out to `gh auth token`. Only
+            # that last fallback reaches this wrapper, and it is reached only
+            # when the token lives in a system keyring and no token env var is
+            # set. With GH_TOKEN exported (CI, containers) or the token stored
+            # in hosts.yml (no keyring available), gh-stack picks up the
+            # personal token and the stack lands as the human. Routing the
+            # writing subcommands through the exchange path sets GH_TOKEN to
+            # the as-a-bot token, which wins that precedence outright and
+            # closes all three cases at once.
+            #
+            # Safe below = never mutates anything on GitHub:
+            #   view, init                     — read-only API calls
+            #   add, modify, rebase, push,     — no API client at all;
+            #   switch, up, down, top, bottom,   local git and stack state only
+            #   trunk, alias, feedback
+            # Everything else falls through to the write path: submit, sync,
+            # link, merge, unstack and checkout all reach CreatePR /
+            # CreateStack / AddToStack / UpdatePRBase / Unstack /
+            # MergeStackAsync. Unlisted subcommands are gated by default, so
+            # preview additions fail closed rather than silently unattributed.
+            case "$subcommand" in
+                view|init|add|modify|rebase|push|switch|up|down|top|bottom|trunk|alias|feedback)
+                    return 0
+                    ;;
+            esac
+            ;;
         api)
             # Robust method detection for gh api:
             # - Supports --method/--method=/-X/-X= (case-insensitive)
@@ -1408,10 +1447,22 @@ is_safe_operation() {
 
     # If the command is not a recognized gh built-in with write potential,
     # treat it as a gh extension invocation. Extension dispatch is safe at this
-    # level — the extension's own gh calls are each evaluated independently.
+    # level *only* for extensions that shell out to `gh <subcommand>`, whose
+    # calls then come back through this wrapper and are evaluated
+    # independently.
+    #
+    # It is NOT safe for extensions that talk to the API themselves. Go
+    # extensions built on go-gh (`api.NewRESTClient`/`NewGraphQLClient`)
+    # resolve a token via GH_TOKEN > GITHUB_TOKEN > hosts.yml oauth_token >
+    # `gh auth token`, then call GitHub directly — only the last of those
+    # reaches us, and only on keyring-backed setups with no token env var.
+    # Such an extension must be listed below so it takes the write path, which
+    # exports GH_TOKEN as the as-a-bot token. `stack` is the first of these;
+    # audit any extension added here the same way.
     case "$cmd" in
-        pr|issue|repo|release|gist|workflow|run|secret|variable|codespace|label|ruleset|project)
-            ;;  # Known built-in with write potential — not safe by default
+        pr|issue|repo|release|gist|workflow|run|secret|variable|codespace|label|ruleset|project|stack)
+            ;;  # Known write potential — not safe by default (stack is the
+                # gh-stack extension; see the case above for why it is listed)
         *)
             # Global flags (e.g. --repo, -R, --hostname) can appear before the
             # subcommand. If $cmd starts with '-' it is a flag, not an extension
