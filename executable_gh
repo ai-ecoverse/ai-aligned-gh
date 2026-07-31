@@ -796,11 +796,30 @@ image_html_escape() {
     printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
-# Print the final result: bare URL by default, ready-to-paste Markdown
-# with --markdown or an <img> tag with --html (so agents can inline it,
-# e.g. `gh pr comment 42 --body "see $(gh image --markdown shot.png)"`).
+# Print the final result: bare URL by default, or ready-to-paste markup.
+# Images use image markup; videos use links because GitHub rejects external
+# video through camo and strips external <video> elements from comments.
 image_format_output() {
-    local format="$1" alt="$2" url="$3"
+    local format="$1" base="$2" url="$3" ext="$4"
+    local alt="${base%.*}"
+
+    case "$ext" in
+        mp4|mov|webm)
+            case "$format" in
+                markdown)
+                    echo "[${base}](${url})"
+                    ;;
+                html)
+                    echo "<a href=\"$(image_html_escape "$url")\">$(image_html_escape "$base")</a>"
+                    ;;
+                *)
+                    echo "$url"
+                    ;;
+            esac
+            return
+            ;;
+    esac
+
     case "$format" in
         markdown)
             echo "![${alt}](${url})"
@@ -825,9 +844,10 @@ FLAGS
   -R, --repo <owner/repo>   Target repository (default: current directory)
       --timeout <seconds>   How long to wait for the upload URL (default: 180)
   -m, --markdown            Print ready-to-embed Markdown instead of the bare
-                            URL: ![<filename>](<url>)
+                            URL. Images use ![<name>](<url>); videos use
+                            [<filename>](<url>).
       --html                Print an HTML tag instead of the bare URL:
-                            <img src="<url>" alt="<filename>">
+                            <img> for images; a labelled <a> link for videos.
   -h, --help                Show this help
 
 EXAMPLES
@@ -990,7 +1010,7 @@ handle_image_command() {
     # Content-addressed dedupe: identical content is already served.
     if curl -sfI "$serve_url" >/dev/null 2>&1; then
         debug_log "Content already uploaded, returning existing URL"
-        image_format_output "$output_format" "${base%.*}" "$serve_url"
+        image_format_output "$output_format" "$base" "$serve_url" "$ext"
         exit 0
     fi
 
@@ -1059,7 +1079,7 @@ handle_image_command() {
             uploaded)
                 # The identical content landed in the bucket already.
                 [ -n "$response_serve" ] && serve_url="$response_serve"
-                image_format_output "$output_format" "${base%.*}" "$serve_url"
+                image_format_output "$output_format" "$base" "$serve_url" "$ext"
                 exit 0
                 ;;
             ready)
@@ -1114,7 +1134,7 @@ handle_image_command() {
         sleep 1
     done
 
-    image_format_output "$output_format" "${base%.*}" "$serve_url"
+    image_format_output "$output_format" "$base" "$serve_url" "$ext"
     exit 0
 }
 # --- END gh image ---
