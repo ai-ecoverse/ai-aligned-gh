@@ -93,6 +93,37 @@ through to the real `gh` and returns your personal token as usual. If the bot
 token cannot be issued (app not yet authorized), the command fails closed rather
 than falling back to your personal token.
 
+### Stacked pull requests (`gh stack`)
+
+GitHub's [stacked pull requests](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs)
+ship as the `github/gh-stack` extension rather than as part of core `gh`. The
+wrapper gates the subcommands that write to GitHub — `submit`, `sync`, `link`,
+`merge`, `unstack`, `checkout` — so they run with the as-a-bot token. Navigation
+and local-only subcommands (`view`, `init`, `add`, `modify`, `rebase`, `push`,
+`switch`, `up`, `down`, `top`, `bottom`, `trunk`, `alias`, `feedback`) stay on
+the fast path. Subcommands added later are gated by default.
+
+This is needed because `gh-stack` does **not** shell out to `gh pr create`. It
+is a Go binary that builds its own [go-gh](https://github.com/cli/go-gh) client
+and creates PRs, repoints bases, and merges over GraphQL/REST directly, so those
+writes never come back through this wrapper. go-gh picks its token in the order
+`GH_TOKEN` → `GITHUB_TOKEN` → `oauth_token` in `hosts.yml` → shelling out to
+`gh auth token`; only that last fallback reaches the wrapper. Gating puts the
+bot token in `GH_TOKEN`, which wins outright — otherwise stacks created with
+`GH_TOKEN` set (CI, containers) or with the token stored in `hosts.yml` (no
+system keyring) would land as you rather than as `as-a-bot[bot]`.
+
+Note that branch pushes are a separate path: `git push` authenticates through
+the `gh auth git-credential` helper, which `gh auth setup-git` wires up with an
+absolute path to the real `gh`, bypassing the wrapper. `gh stack push` and the
+push half of `submit`/`sync` are therefore attributed to you regardless of this
+gating. Commit authorship is governed by `git config user.name`/`user.email`, not
+by the token.
+
+Any other extension that talks to the GitHub API itself rather than shelling out
+to `gh` has the same gap. If you add one, audit it and list it alongside `stack`
+in `is_safe_operation`.
+
 ## 📋 Prerequisites
 
 1. **GitHub CLI**: Install from [cli.github.com](https://cli.github.com/)

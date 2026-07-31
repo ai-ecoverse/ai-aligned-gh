@@ -143,6 +143,48 @@ assert_unsafe "graphql explicit POST stays gated" \
 assert_unsafe "REST endpoint with query-shaped field is not graphql" \
     api repos/owner/repo/issues -f 'query=query{viewer{login}}'
 
+# --- gh-stack extension (stacked pull requests) ---
+# gh-stack builds its own go-gh client instead of shelling out to `gh`, so its
+# writes are never re-evaluated by this wrapper. The writing subcommands must
+# take the exchange path so GH_TOKEN is set to the as-a-bot token.
+echo ""
+echo "--- stack: read-only and local-only subcommands are safe ---"
+assert_safe  "stack view"          stack view
+assert_safe  "stack init"          stack init
+assert_safe  "stack add"           stack add
+assert_safe  "stack modify"        stack modify
+assert_safe  "stack rebase"        stack rebase
+assert_safe  "stack push"          stack push
+assert_safe  "stack switch"        stack switch
+assert_safe  "stack up"            stack up
+assert_safe  "stack down"          stack down
+assert_safe  "stack top"           stack top
+assert_safe  "stack bottom"        stack bottom
+assert_safe  "stack trunk"         stack trunk
+assert_safe  "stack alias"         stack alias
+assert_safe  "stack feedback"      stack feedback
+
+echo ""
+echo "--- stack: mutating subcommands are gated ---"
+assert_unsafe "stack submit"       stack submit
+assert_unsafe "stack sync"         stack sync
+assert_unsafe "stack link"         stack link
+assert_unsafe "stack merge"        stack merge
+assert_unsafe "stack unstack"      stack unstack
+assert_unsafe "stack checkout"     stack checkout
+assert_unsafe "stack submit with flags" stack submit --draft
+assert_unsafe "stack merge with repo override" stack merge --repo owner/name
+
+echo ""
+echo "--- stack: unknown subcommands fail closed ---"
+assert_unsafe "stack (no subcommand)"   stack
+assert_unsafe "stack future-subcommand" stack some-new-preview-command
+
+echo ""
+echo "--- other extensions keep the fast path ---"
+assert_safe  "dash extension"      dash
+assert_safe  "workflow-peek extension" workflow-peek pr 123
+
 echo ""
 echo "--- API: = forms of body flags imply POST ---"
 assert_unsafe "api --field=key=val"  api '--field=title=hi' repos/owner/repo
