@@ -171,26 +171,58 @@ if [ -f "$INSTALL_DIR/$SCRIPT_NAME" ] && [ "$UPGRADE" != "true" ]; then
     fi
 fi
 
-# Download or copy the wrapper script
+# Download or copy the wrapper script into a staged file in the same
+# directory as the target, then atomically rename it into place. Staging
+# in the target directory keeps `mv` a true atomic rename(2), so an
+# interrupted or truncated write never leaves a broken shim on PATH
+# shadowing the real gh.
 print_color "$BLUE" "Installing wrapper script..."
+staged="$INSTALL_DIR/.$SCRIPT_NAME.new.$$"
+# Ensure the staged file is removed on any early exit before the rename.
+trap 'rm -f "$staged"' EXIT
 if [ -f "$SOURCE_SCRIPT" ]; then
     # Local installation
-    print_verbose "Copying from local file: $SOURCE_SCRIPT"
-    cp "$SOURCE_SCRIPT" "$INSTALL_DIR/$SCRIPT_NAME"
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-    print_color "$GREEN" "✓ Wrapper script installed from local file"
+    print_verbose "Copying from local file: $SOURCE_SCRIPT to staged file: $staged"
+    cp "$SOURCE_SCRIPT" "$staged"
+    install_source="local"
 else
     # Remote installation
-    print_verbose "Downloading from: $RAW_BASE_URL/$SOURCE_SCRIPT"
+    print_verbose "Downloading from: $RAW_BASE_URL/$SOURCE_SCRIPT to staged file: $staged"
     if command_exists curl; then
-        curl -fsSL "$RAW_BASE_URL/$SOURCE_SCRIPT" -o "$INSTALL_DIR/$SCRIPT_NAME"
+        curl -fsSL "$RAW_BASE_URL/$SOURCE_SCRIPT" -o "$staged"
     elif command_exists wget; then
-        wget -q "$RAW_BASE_URL/$SOURCE_SCRIPT" -O "$INSTALL_DIR/$SCRIPT_NAME"
+        wget -q "$RAW_BASE_URL/$SOURCE_SCRIPT" -O "$staged"
     else
         print_color "$RED" "Error: Neither curl nor wget is available"
         exit 1
     fi
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
+    install_source="remote"
+fi
+
+# Verify the staged file is non-empty and executable before swapping.
+if [ ! -s "$staged" ]; then
+    print_color "$RED" "Error: staged wrapper is empty, aborting install"
+    exit 1
+fi
+chmod +x "$staged"
+if [ ! -x "$staged" ]; then
+    print_color "$RED" "Error: failed to make staged wrapper executable"
+    exit 1
+fi
+
+# Keep a timestamped backup of the previous wrapper for rollback.
+if [ -f "$INSTALL_DIR/$SCRIPT_NAME" ]; then
+    backup="$INSTALL_DIR/$SCRIPT_NAME.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$INSTALL_DIR/$SCRIPT_NAME" "$backup"
+    print_verbose "Backed up previous wrapper to: $backup"
+fi
+
+# Atomic replace: same-directory mv is a rename(2), never a partial copy.
+mv "$staged" "$INSTALL_DIR/$SCRIPT_NAME"
+trap - EXIT
+if [ "$install_source" = "local" ]; then
+    print_color "$GREEN" "✓ Wrapper script installed from local file"
+else
     print_color "$GREEN" "✓ Wrapper script downloaded and installed"
 fi
 echo
