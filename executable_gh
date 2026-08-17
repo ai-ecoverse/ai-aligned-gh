@@ -1626,111 +1626,220 @@ poll_for_token_background() {
     done
 }
 
+# Try a single foreground poll of a pending device flow. If the human has
+# already authorized the code, this picks the token up immediately instead of
+# making the next invocation race the background poller.
+#
+# Returns:
+#   0 - token acquired (printed to stdout, saved to the cache file)
+#   1 - still pending (authorization_pending / slow_down / transient error)
+#   2 - flow is dead at the broker (denied/expired); state cleaned up, the
+#       caller may mint a fresh flow
+poll_pending_flow_once() {
+    local state_file=$1
+    local cache_file=$2
+
+    local device_code
+    device_code=$(jq -r '.device_code // empty' "$state_file" 2>/dev/null)
+    if [ -z "$device_code" ]; then
+        return 1
+    fi
+
+    local response
+    response=$(curl -sS -X POST "${BROKER_URL}/user-token/poll" \
+        -H "Content-Type: application/json" \
+        -d "{\"device_code\":\"${device_code}\"}" 2>/dev/null)
+
+    local access_token
+    access_token=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null)
+    if [ -n "$access_token" ]; then
+        echo "$access_token" > "$cache_file"
+        chmod 600 "$cache_file"
+        rm -f "$state_file" "${state_file}.status"
+        debug_log "Foreground poll picked up a completed authorization"
+        echo "$access_token"
+        return 0
+    fi
+
+    local error
+    error=$(echo "$response" | jq -r '.error // empty' 2>/dev/null)
+    case "$error" in
+        ''|authorization_pending|slow_down|server_error)
+            # Not authorized yet, or the broker was unreachable — either way
+            # the flow may still succeed, so keep it alive.
+            return 1
+            ;;
+        *)
+            # access_denied, expired_token, incorrect device code, ...
+            debug_log "Pending device flow is dead at the broker: $error"
+            echo "[ERROR] Previous authentication failed: $error" >&2
+            rm -f "$state_file" "${state_file}.status"
+            return 2
+            ;;
+    esac
+}
+
 # Function to get or create cached token
 get_cached_token() {
     local cache_dir="$HOME/.cache/ai-aligned-gh"
     local state_dir="$HOME/.config/ai-aligned-gh/auth"
     local cache_file="$cache_dir/token"
     local state_file="$state_dir/device_flow.json"
-    
+
     # Create directories if they don't exist
     mkdir -p "$cache_dir" "$state_dir"
-    
-    # Check if cached token exists and is still valid
+
+    # A completed background exchange saves the token to $cache_file, writes
+    # "completed" to ${state_file}.status, and deletes $state_file itself
+    # (see poll_for_token_background). Consume the marker here, BEFORE any
+    # state-file checks: gating it on $state_file existing made the
+    # "completed" branch unreachable in exactly the case it was written for.
+    if [ -f "$cache_file" ] && [ -f "${state_file}.status" ] &&
+        [ "$(cat "${state_file}.status" 2>/dev/null)" = "completed" ]; then
+        debug_log "Background device flow completed; consuming status marker"
+        rm -f "${state_file}.status"
+    fi
+
+    # Check if cached token exists and is still usable
     if [ -f "$cache_file" ]; then
         local cached_token
         cached_token=$(cat "$cache_file")
-        
-        # Verify token is still valid and check its type
-        local rate_limit
-        
-        if GH_TOKEN="$cached_token" "$GH_BIN" api user >/dev/null 2>&1; then
+
+        # Verify the token. Only an explicit HTTP 401 proves it is dead —
+        # rate limiting (HTTP 403/429), network failures, and server errors
+        # say nothing about validity. Treating any failure as "invalid"
+        # deleted freshly exchanged tokens and re-minted a device flow on
+        # every invocation, burning each code right after the human
+        # authorized it.
+        local api_output api_exit
+        api_output=$(GH_TOKEN="$cached_token" "$GH_BIN" api user 2>&1)
+        api_exit=$?
+
+        if [ "$api_exit" -eq 0 ]; then
             # Check if this is a user-to-server token (ghu_ prefix)
             if [[ "$cached_token" == ghu_* ]]; then
                 debug_log "Using valid user-to-server token (ghu_ prefix)"
-                
+
                 # Optionally check rate limit to confirm it's a proper GitHub App token
                 if [ "$DEBUG" = "true" ]; then
+                    local rate_limit
                     rate_limit=$(GH_TOKEN="$cached_token" "$GH_BIN" api rate_limit --jq '.rate.limit' 2>/dev/null)
                     debug_log "Token rate limit: $rate_limit (15000=GitHub App user token, 5000=OAuth token)"
                 fi
             else
                 debug_log "WARNING: Token doesn't have ghu_ prefix, may not have app attribution"
             fi
-            
+
             echo "$cached_token"
             return 0
-        else
-            debug_log "Cached token is invalid, removing it"
+        elif echo "$api_output" | grep -q "HTTP 401"; then
+            debug_log "Cached token rejected with HTTP 401, removing it"
             rm -f "$cache_file"
+        else
+            debug_log "Token check failed transiently (exit $api_exit), keeping cached token: $api_output"
+            echo "$cached_token"
+            return 0
         fi
     fi
-    
+
     # Check if there's an in-progress device flow
     if [ -f "$state_file" ]; then
-        local state_age=$(($(date +%s) - $(stat -f %m "$state_file" 2>/dev/null || stat -c %Y "$state_file" 2>/dev/null)))
-        
-        # If state file is less than 15 minutes old
-        if [ $state_age -lt 900 ]; then
+        local state_age
+        state_age=$(($(date +%s) - $(stat -f %m "$state_file" 2>/dev/null || stat -c %Y "$state_file" 2>/dev/null)))
+
+        # The flow expires when GitHub says it does (expires_in, measured
+        # from the state file's creation); fall back to 15 minutes if the
+        # field is missing or malformed.
+        local flow_expires_in
+        flow_expires_in=$(jq -r '.expires_in // empty' "$state_file" 2>/dev/null)
+        case "$flow_expires_in" in
+            ''|*[!0-9]*) flow_expires_in=900 ;;
+        esac
+
+        if [ "$state_age" -lt "$flow_expires_in" ]; then
             debug_log "Found recent device flow state (${state_age}s old)"
-            
-            # Check if there's a status file indicating completion
+
+            local flow_status=""
             if [ -f "${state_file}.status" ]; then
-                local status
-                status=$(cat "${state_file}.status")
-                
-                if [ "$status" = "completed" ]; then
-                    # Token should have been saved, try again
-                    rm -f "${state_file}.status"
-                    if [ -f "$cache_file" ]; then
-                        cached_token=$(cat "$cache_file")
-                        echo "$cached_token"
-                        return 0
-                    fi
-                elif [[ "$status" == "failed:"* ]]; then
-                    echo "[ERROR] Previous authentication failed: ${status#failed: }" >&2
-                    rm -f "$state_file" "${state_file}.status"
-                elif [ "$status" = "expired" ]; then
-                    echo "[ERROR] Previous authentication expired" >&2
-                    rm -f "$state_file" "${state_file}.status"
-                fi
+                flow_status=$(cat "${state_file}.status")
+            fi
+
+            if [[ "$flow_status" == "failed:"* ]]; then
+                echo "[ERROR] Previous authentication failed: ${flow_status#failed: }" >&2
+                rm -f "$state_file" "${state_file}.status"
+            elif [ "$flow_status" = "expired" ]; then
+                echo "[ERROR] Previous authentication expired" >&2
+                rm -f "$state_file" "${state_file}.status"
             else
-                # Still in progress, show the existing code
-                local user_code verification_uri
-                user_code=$(jq -r '.user_code' "$state_file" 2>/dev/null)
-                verification_uri=$(jq -r '.verification_uri' "$state_file" 2>/dev/null)
-                
-                if [ -n "$user_code" ] && [ -n "$verification_uri" ]; then
-                    echo "" >&2
-                    echo "=================================================================" >&2
-                    echo "  GitHub App Authentication Already In Progress" >&2
-                    echo "=================================================================" >&2
-                    echo "" >&2
-                    echo "  AI tool detected: $AI_TOOL" >&2
-                    echo "" >&2
-                    echo "  Please complete the authorization:" >&2
-                    echo "" >&2
-                    echo "  For humans:" >&2
-                    echo "  1. Visit: $verification_uri" >&2
-                    echo "  2. Enter code: $user_code" >&2
-                    echo "" >&2
-                    echo "  For AI agents - run these commands:" >&2
-                    echo "  echo '$user_code' | pbcopy" >&2
-                    echo "  open '$verification_uri'" >&2
-                    echo "" >&2
-                    echo "  Authentication will complete in the background." >&2
-                    echo "  Try your command again in a few seconds." >&2
-                    echo "" >&2
-                    return 1
+                # The flow is still live. (A stale "completed" marker from an
+                # EARLIER flow can sit next to a fresh pending state file —
+                # the mint path used to leave it behind. It must not cause
+                # this flow to be abandoned: the human may be typing this
+                # very code into github.com/login/device right now.)
+                #
+                # Give the broker one foreground poll: if the human already
+                # authorized, we get the token right here instead of racing
+                # the background poller.
+                local pending_token poll_result
+                pending_token=$(poll_pending_flow_once "$state_file" "$cache_file")
+                poll_result=$?
+
+                if [ "$poll_result" -eq 0 ]; then
+                    echo "$pending_token"
+                    return 0
                 fi
+
+                if [ "$poll_result" -eq 1 ]; then
+                    # Still pending: re-show the EXISTING code. Never mint a
+                    # new flow while this one is live — that rotates the code
+                    # away under the human's fingers.
+                    local user_code verification_uri
+                    user_code=$(jq -r '.user_code // empty' "$state_file" 2>/dev/null)
+                    verification_uri=$(jq -r '.verification_uri // empty' "$state_file" 2>/dev/null)
+
+                    if [ -n "$user_code" ] && [ -n "$verification_uri" ]; then
+                        echo "" >&2
+                        echo "=================================================================" >&2
+                        echo "  GitHub App Authentication Already In Progress" >&2
+                        echo "=================================================================" >&2
+                        echo "" >&2
+                        echo "  AI tool detected: $AI_TOOL" >&2
+                        echo "" >&2
+                        echo "  Please complete the authorization:" >&2
+                        echo "" >&2
+                        echo "  For humans:" >&2
+                        echo "  1. Visit: $verification_uri" >&2
+                        echo "  2. Enter code: $user_code" >&2
+                        echo "" >&2
+                        echo "  For AI agents - run these commands:" >&2
+                        echo "  echo '$user_code' | pbcopy" >&2
+                        echo "  open '$verification_uri'" >&2
+                        echo "" >&2
+                        echo "  Authentication will complete in the background." >&2
+                        echo "  Try your command again in a few seconds." >&2
+                        echo "" >&2
+                        return 1
+                    fi
+
+                    # State file is unreadable or corrupt — only then is
+                    # replacing the flow the right call.
+                    debug_log "Pending device flow state is corrupt, discarding"
+                    rm -f "$state_file" "${state_file}.status"
+                fi
+                # poll_result 2: the flow was denied/expired at the broker;
+                # state has been cleaned up — fall through and mint anew.
             fi
         else
-            debug_log "Device flow state is too old (${state_age}s), removing"
+            debug_log "Device flow state expired after ${flow_expires_in}s (${state_age}s old), removing"
             rm -f "$state_file" "${state_file}.status"
         fi
     fi
-    
-    # No valid cached token or in-progress flow, start new auth flow
+
+    # No valid cached token or live flow: mint a new one. Clear any stale
+    # status marker first so it cannot poison the next invocation's view of
+    # the flow we are about to create.
+    rm -f "${state_file}.status"
+
     debug_log "Starting new authentication flow"
     
     # Use device flow for CLI (doesn't require browser redirect)

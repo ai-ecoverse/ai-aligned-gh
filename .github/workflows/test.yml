@@ -40,3 +40,6 @@ jobs:
       run: |
         export PATH="$HOME/.local/bin:$PATH"
         ./test_timeout.sh
+
+    - name: Run device flow reuse tests
+      run: ./test_device_flow_reuse.sh
