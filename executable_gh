@@ -1744,8 +1744,17 @@ get_cached_token() {
 
     # Check if there's an in-progress device flow
     if [ -f "$state_file" ]; then
-        local state_age
-        state_age=$(($(date +%s) - $(stat -f %m "$state_file" 2>/dev/null || stat -c %Y "$state_file" 2>/dev/null)))
+        local state_age state_mtime
+        # GNU stat -f means "filesystem status" and SUCCEEDS, so a
+        # `stat -f %m || stat -c %Y` fallback never reaches the fallback on
+        # Linux and feeds block counts into the arithmetic. Dispatch on the
+        # OS instead, as the cached-token check above already does.
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            state_mtime=$(stat -f %m "$state_file" 2>/dev/null)
+        else
+            state_mtime=$(stat -c %Y "$state_file" 2>/dev/null)
+        fi
+        state_age=$(($(date +%s) - ${state_mtime:-0}))
 
         # The flow expires when GitHub says it does (expires_in, measured
         # from the state file's creation); fall back to 15 minutes if the
