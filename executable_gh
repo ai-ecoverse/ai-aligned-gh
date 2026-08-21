@@ -1820,9 +1820,13 @@ get_cached_token() {
                         echo "  1. Visit: $verification_uri" >&2
                         echo "  2. Enter code: $user_code" >&2
                         echo "" >&2
-                        echo "  For AI agents - run these commands:" >&2
-                        echo "  echo '$user_code' | pbcopy" >&2
-                        echo "  open '$verification_uri'" >&2
+                        echo "  For AI agents - relay, do not automate:" >&2
+                        echo "  A sandboxed agent shell can reach neither the clipboard nor the" >&2
+                        echo "  browser (pbcopy exits 1, open reports procNotFound), and there is" >&2
+                        echo "  no pre-filled URL - GitHub does not support user_code as a query" >&2
+                        echo "  parameter. Show the user the URL and code above verbatim and ask" >&2
+                        echo "  them to authorize. Only if your shell is NOT sandboxed:" >&2
+                        echo "    printf '%s' '$user_code' | pbcopy && open '$verification_uri'" >&2
                         echo "" >&2
                         echo "  Authentication will complete in the background." >&2
                         echo "  Try your command again in a few seconds." >&2
@@ -1904,9 +1908,13 @@ get_cached_token() {
     echo "  1. Visit: $verification_uri" >&2
     echo "  2. Enter code: $user_code" >&2
     echo "" >&2
-    echo "  For AI agents - run these commands:" >&2
-    echo "  echo '$user_code' | pbcopy" >&2
-    echo "  open '$verification_uri'" >&2
+    echo "  For AI agents - relay, do not automate:" >&2
+    echo "  A sandboxed agent shell can reach neither the clipboard nor the" >&2
+    echo "  browser (pbcopy exits 1, open reports procNotFound), and there is" >&2
+    echo "  no pre-filled URL - GitHub does not support user_code as a query" >&2
+    echo "  parameter. Show the user the URL and code above verbatim and ask" >&2
+    echo "  them to authorize. Only if your shell is NOT sandboxed:" >&2
+    echo "    printf '%s' '$user_code' | pbcopy && open '$verification_uri'" >&2
     echo "" >&2
     echo "  Authentication will complete in the background." >&2
     echo "  Try your command again after authorizing." >&2
