@@ -43,3 +43,6 @@ jobs:
 
     - name: Run device flow reuse tests
       run: ./test_device_flow_reuse.sh
+
+    - name: Run atomic install tests
+      run: ./test_install_atomic.sh

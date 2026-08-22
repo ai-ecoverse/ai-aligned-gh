@@ -171,27 +171,94 @@ if [ -f "$INSTALL_DIR/$SCRIPT_NAME" ] && [ "$UPGRADE" != "true" ]; then
     fi
 fi
 
-# Download or copy the wrapper script
+# Staged, atomic installation
+#
+# The target ($INSTALL_DIR/gh) shadows the real gh for every tool on this
+# machine, so it must never be observed in a half-written state. We stage the
+# new wrapper next to the target (same directory => same filesystem, so mv is
+# an atomic rename rather than a copy), verify it, and only then swap it in.
+TARGET="$INSTALL_DIR/$SCRIPT_NAME"
+STAGED="$INSTALL_DIR/.$SCRIPT_NAME.new.$$"
+BACKUP=""
+
+cleanup_staged() {
+    [ -n "$STAGED" ] && rm -f "$STAGED"
+    return 0
+}
+trap cleanup_staged EXIT INT TERM HUP
+
+# Fetch the wrapper into the staging file
 print_color "$BLUE" "Installing wrapper script..."
 if [ -f "$SOURCE_SCRIPT" ]; then
     # Local installation
     print_verbose "Copying from local file: $SOURCE_SCRIPT"
-    cp "$SOURCE_SCRIPT" "$INSTALL_DIR/$SCRIPT_NAME"
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-    print_color "$GREEN" "✓ Wrapper script installed from local file"
+    cp "$SOURCE_SCRIPT" "$STAGED"
+    SOURCE_DESC="local file"
 else
     # Remote installation
     print_verbose "Downloading from: $RAW_BASE_URL/$SOURCE_SCRIPT"
     if command_exists curl; then
-        curl -fsSL "$RAW_BASE_URL/$SOURCE_SCRIPT" -o "$INSTALL_DIR/$SCRIPT_NAME"
+        curl -fsSL "$RAW_BASE_URL/$SOURCE_SCRIPT" -o "$STAGED"
     elif command_exists wget; then
-        wget -q "$RAW_BASE_URL/$SOURCE_SCRIPT" -O "$INSTALL_DIR/$SCRIPT_NAME"
+        wget -q "$RAW_BASE_URL/$SOURCE_SCRIPT" -O "$STAGED"
     else
         print_color "$RED" "Error: Neither curl nor wget is available"
         exit 1
     fi
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-    print_color "$GREEN" "✓ Wrapper script downloaded and installed"
+    SOURCE_DESC="download"
+fi
+
+# Verify the staged file before it is allowed anywhere near PATH
+if [ ! -s "$STAGED" ]; then
+    print_color "$RED" "Error: $SOURCE_DESC produced an empty file"
+    print_color "$YELLOW" "Existing $TARGET was left untouched"
+    exit 1
+fi
+if [ "$(head -c 2 "$STAGED")" != "#!" ]; then
+    print_color "$RED" "Error: $SOURCE_DESC did not produce a script (no #! line)"
+    print_color "$YELLOW" "Existing $TARGET was left untouched"
+    exit 1
+fi
+if ! grep -q "ai-aligned-gh" "$STAGED" 2>/dev/null; then
+    print_color "$RED" "Error: $SOURCE_DESC appears incomplete or corrupted"
+    print_color "$YELLOW" "Existing $TARGET was left untouched"
+    exit 1
+fi
+chmod +x "$STAGED"
+if [ ! -x "$STAGED" ]; then
+    print_color "$RED" "Error: could not make the staged wrapper executable"
+    print_color "$YELLOW" "Existing $TARGET was left untouched"
+    exit 1
+fi
+print_verbose "Staged wrapper verified at $STAGED"
+
+# Keep a rollback copy of whatever is currently installed
+if [ -e "$TARGET" ]; then
+    BACKUP="$TARGET.backup.$(date +%Y%m%d%H%M%S)"
+    if cp -p "$TARGET" "$BACKUP" 2>/dev/null; then
+        print_verbose "Backed up existing wrapper to $BACKUP"
+    else
+        print_color "$YELLOW" "Warning: could not back up $TARGET; continuing without rollback copy"
+        BACKUP=""
+    fi
+fi
+
+# Atomic swap: rename within the same directory replaces the target in one step
+if ! mv -f "$STAGED" "$TARGET"; then
+    print_color "$RED" "Error: failed to install wrapper to $TARGET"
+    if [ -n "$BACKUP" ] && [ -e "$BACKUP" ]; then
+        print_color "$YELLOW" "Restoring previous wrapper from $BACKUP"
+        cp -p "$BACKUP" "$TARGET" || \
+            print_color "$RED" "Rollback failed; restore manually: cp $BACKUP $TARGET"
+    fi
+    exit 1
+fi
+STAGED=""
+trap - EXIT INT TERM HUP
+
+print_color "$GREEN" "✓ Wrapper script installed from $SOURCE_DESC"
+if [ -n "$BACKUP" ]; then
+    print_color "$WHITE" "  Previous version kept at: $BACKUP"
 fi
 echo
 
