@@ -185,7 +185,13 @@ cleanup_staged() {
     [ -n "$STAGED" ] && rm -f "$STAGED"
     return 0
 }
-trap cleanup_staged EXIT INT TERM HUP
+# A signal must abort the install, not just tidy up: a returning handler would
+# let the script resume and go on to replace gh despite having been cancelled.
+# Only EXIT gets the returning handler.
+trap cleanup_staged EXIT
+trap 'cleanup_staged; exit 130' INT
+trap 'cleanup_staged; exit 143' TERM
+trap 'cleanup_staged; exit 129' HUP
 
 # Fetch the wrapper into the staging file
 print_color "$BLUE" "Installing wrapper script..."
@@ -220,7 +226,22 @@ if [ "$(head -c 2 "$STAGED")" != "#!" ]; then
     exit 1
 fi
 if ! grep -q "ai-aligned-gh" "$STAGED" 2>/dev/null; then
-    print_color "$RED" "Error: $SOURCE_DESC appears incomplete or corrupted"
+    print_color "$RED" "Error: $SOURCE_DESC does not look like the AI-Aligned wrapper"
+    print_color "$YELLOW" "Existing $TARGET was left untouched"
+    exit 1
+fi
+# Completeness checks. The marker above only proves the file *started* arriving:
+# a transfer cut off after it still carries the shebang and the marker. A
+# truncated text file loses its final newline, and a shell script cut mid-script
+# no longer parses, so these two catch truncation wherever it lands.
+if [ -n "$(tail -c 1 "$STAGED")" ]; then
+    print_color "$RED" "Error: $SOURCE_DESC was truncated (file does not end in a newline)"
+    print_color "$YELLOW" "Existing $TARGET was left untouched"
+    exit 1
+fi
+# bash -n parses without executing anything from the staged file.
+if ! bash -n "$STAGED" 2>/dev/null; then
+    print_color "$RED" "Error: $SOURCE_DESC is not a complete, valid script"
     print_color "$YELLOW" "Existing $TARGET was left untouched"
     exit 1
 fi

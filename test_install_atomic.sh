@@ -123,6 +123,83 @@ else
 fi
 rm -rf "$SANDBOX"
 
+# --- Truncated after the marker must still be rejected (codex review, #73) ---
+# The marker only proves the transfer started. A source cut off after it keeps
+# the shebang and the marker, so completeness must be checked separately.
+make_sandbox
+GH="$SANDBOX/home/.local/bin/gh"
+printf '#!/bin/bash\n# ai-aligned-gh wrapper\necho old-wrapper\n' > "$GH"
+chmod +x "$GH"
+printf '#!/bin/bash\n# ai-aligned-gh wrapper\nif true; then\n  echo half\n' \
+    > "$SANDBOX/work/executable_gh"
+run_install >/dev/null 2>&1
+if grep -q old-wrapper "$GH"; then
+    pass "source truncated after the marker is rejected"
+else
+    fail "source truncated after the marker is rejected"
+fi
+rm -rf "$SANDBOX"
+
+# --- A source cut mid-line (no trailing newline) must be rejected ---
+make_sandbox
+GH="$SANDBOX/home/.local/bin/gh"
+printf '#!/bin/bash\n# ai-aligned-gh wrapper\necho old-wrapper\n' > "$GH"
+chmod +x "$GH"
+printf '#!/bin/bash\n# ai-aligned-gh wrapper\necho comp' \
+    > "$SANDBOX/work/executable_gh"
+run_install >/dev/null 2>&1
+if grep -q old-wrapper "$GH"; then
+    pass "source cut mid-line is rejected"
+else
+    fail "source cut mid-line is rejected"
+fi
+rm -rf "$SANDBOX"
+
+# --- A signal during the download must abort, not resume (codex review, #73) ---
+# TERM is delivered to the installer only; bash defers the handler until the
+# in-flight curl returns, so a handler that merely cleans up and returns would
+# let the install continue and replace gh despite being cancelled.
+make_sandbox
+GH="$SANDBOX/home/.local/bin/gh"
+printf '#!/bin/bash\n# ai-aligned-gh wrapper\necho old-wrapper\n' > "$GH"
+chmod +x "$GH"
+rm "$SANDBOX/work/executable_gh"
+# curl stub: stage a partial file, then linger so TERM lands mid-download
+cat > "$SANDBOX/bin/curl" <<'STUB'
+#!/bin/bash
+out=""
+while [ $# -gt 0 ]; do
+    [ "$1" = "-o" ] && { out="$2"; shift; }
+    shift
+done
+[ -n "$out" ] && printf '#!/bin/bash\n# ai-aligned-gh wrapper\necho new-wrapper\n' > "$out"
+sleep 3
+exit 0
+STUB
+chmod +x "$SANDBOX/bin/curl"
+rm -f "$SANDBOX/bin/wget"
+( cd "$SANDBOX/work" && \
+  HOME="$SANDBOX/home" UPGRADE=true PATH="$SANDBOX/bin:$PATH" \
+  exec bash ./install.sh ) >/dev/null 2>&1 &
+INSTALL_PID=$!
+sleep 1
+kill -TERM "$INSTALL_PID" 2>/dev/null
+wait "$INSTALL_PID"
+INSTALL_RC=$?
+if [ "$INSTALL_RC" -eq 143 ]; then
+    pass "TERM during download exits with a signal-derived status (143)"
+else
+    fail "TERM during download exits with a signal-derived status (got $INSTALL_RC)"
+fi
+if grep -q old-wrapper "$GH"; then
+    pass "TERM during download leaves the existing wrapper intact"
+else
+    fail "TERM during download leaves the existing wrapper intact"
+fi
+assert "TERM during download leaves no staging file behind" \
+    bash -c '! ls "$1"/home/.local/bin/.gh.new.* >/dev/null 2>&1' _ "$SANDBOX"
+rm -rf "$SANDBOX"
+
 # --- Staging happens in the target directory (same filesystem => atomic mv) ---
 if grep -q 'STAGED="$INSTALL_DIR/' "$REPO_DIR/install.sh"; then
     pass "staging file lives in the install directory"
