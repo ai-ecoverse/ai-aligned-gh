@@ -34,6 +34,18 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+Because `~/.local/bin/gh` shadows the real `gh` for everything on the machine, the
+installer never writes to it directly. It downloads the wrapper to a staging file in
+`~/.local/bin`, checks that the file is complete (non-empty, ends in a newline, and
+parses as a shell script) and executable, and only then swaps it into place with an
+atomic `mv`. An interrupted or failed install therefore leaves your
+existing `gh` untouched. When an upgrade replaces an existing wrapper, the previous
+version is kept as `~/.local/bin/gh.backup.<timestamp>` so you can roll back with:
+
+```bash
+cp ~/.local/bin/gh.backup.<timestamp> ~/.local/bin/gh
+```
+
 ## 🔧 How It Works
 
 ### The Wrapper Pattern
