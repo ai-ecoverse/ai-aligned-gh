@@ -207,52 +207,20 @@ gh impersonate --remove someorg/somerepo
 
 This is an explicit opt-in — the wrapper will still fail loudly for repos not in the list, so you always know when attribution is missing.
 
-## 🖼️ Uploading Images (`gh image`)
+## 🖼️ Attaching Images (`--attach`)
 
-`gh` cannot attach images or videos to PRs and issues ([cli/cli#12960](https://github.com/cli/cli/issues/12960)) — a real limitation for coding agents that want to include screenshots or screen recordings. The wrapper adds a `gh image` subcommand that uploads a file to an R2 bucket via the [as-a-bot](https://github.com/ai-ecoverse/as-a-bot) image-upload flow and prints a stable URL you can embed in Markdown:
-
-```bash
-$ gh image screenshot.png
-https://repo--owner.agentbin.net/<sha256>.png
-
-# Then embed it:
-gh pr comment 42 --body "Before/after: ![screenshot](https://repo--owner.agentbin.net/<sha256>.png)"
-```
-
-Supported types: `png jpg jpeg gif webp svg avif mp4 mov webm`. Use `--repo owner/repo` outside a repository directory and `--timeout <seconds>` to adjust the wait (default 180s).
-
-With `--markdown` (`-m`) the output is ready-to-embed markup, and with `--html` it is an HTML tag. Images use image markup; videos use labelled links because GitHub rejects externally hosted video through its image proxy and strips external `<video>` elements. The default bare-URL output is unchanged:
+[gh 2.99.0](https://github.com/cli/cli/releases/tag/v2.99.0) attaches images and videos to issues, pull requests, and comments natively with the repeatable `--attach` flag:
 
 ```bash
-gh pr comment 42 --body "Before/after: $(gh image --markdown after.png)"
-# → Before/after: ![after](https://repo--owner.agentbin.net/<sha256>.png)
-
-gh pr comment 42 --body "Before/after: $(gh image --html after.png)"
-# → Before/after: <img src="https://repo--owner.agentbin.net/<sha256>.png" alt="after">
-
-# Video output stays clickable instead of producing broken image markup
-gh image --markdown demo.mp4
-# → [demo.mp4](https://repo--owner.agentbin.net/<sha256>.mp4)
-
-gh image --html demo.mp4
-# → <a href="https://repo--owner.agentbin.net/<sha256>.mp4">demo.mp4</a>
+gh issue create --attach './repro.png#The error state'
+gh issue comment 123 --attach ./repro.png
+gh pr create --attach ./before.png
+gh pr comment 456 --attach ./result.mp4
 ```
 
-To make the command discoverable at the moment it matters, the wrapper prints a short stderr tip pointing at `gh image` whenever an AI agent runs `gh pr create` or `gh issue create` — agents otherwise assume image attachment is impossible and skip screenshots entirely.
+To make this discoverable at the moment it matters, the wrapper prints a short stderr tip about `--attach` whenever an AI agent runs `gh pr create` or `gh issue create` — agents otherwise assume media attachment is impossible and skip screenshots entirely. When the installed `gh` is older than 2.99.0, the tip says to update instead.
 
-### How it works
-
-1. `gh image` computes the file's SHA-256 hash and dispatches the repo's `image-upload.yml` workflow with the hash and extension. **GitHub only lets users with write access dispatch workflows** — that's the authorization model: uploading requires the same permission as pushing code. Under an AI tool, the dispatch uses the as-a-bot token like every other write.
-2. The workflow is a secret-free relay: it proves the repository's identity to the as-a-bot worker via GitHub Actions OIDC. The worker mints an R2 PUT URL that is **bound to the content hash** (the signature covers `x-amz-checksum-sha256`, so the URL physically cannot upload different content).
-3. `gh image` polls the worker, uploads the file to the pre-signed URL, verifies it is serveable, and prints the URL (stdout carries only the URL, so agents can capture it).
-
-Storage is content-addressed (`owner/repo/<sha256>.<ext>`): re-uploading the same file returns the same URL instantly without dispatching anything, and a URL can never change content after publication. Uploads are kept for **90 days** — re-running `gh image` on the same file renews the same URL for another 90 days.
-
-### Repository setup (one-time)
-
-Install the [as-a-bot GitHub App](https://github.com/apps/as-a-bot) on the repository. It commits the `image-upload.yml` workflow automatically — the repository needs **no secrets and no other configuration**.
-
-See the [full design document](https://github.com/ai-ecoverse/as-a-bot/blob/main/docs/image-upload-design.md) for the architecture and trust model.
+The wrapper used to ship its own `gh image` upload command because `gh` could not attach media ([cli/cli#12960](https://github.com/cli/cli/issues/12960)). That command is **retired**: running `gh image` now prints the `--attach` equivalent (or tells you to update `gh` first) and exits non-zero.
 
 ## 📝 Pull Request Template Safeguard
 
@@ -344,8 +312,6 @@ The wrapper automatically detects:
 | `GH_TOKEN` | GitHub token override | (uses `gh auth token`) |
 | `PR_TEMPLATE_CACHE_TTL` | PR template check cache lifetime (seconds) | `3600` |
 | `PR_TEMPLATE_CACHE_DIR` | PR template check cache directory | `~/.cache/ai-aligned-gh/pr-template-checks` |
-| `GH_IMAGE_WORKFLOW` | Workflow file `gh image` dispatches | `image-upload.yml` |
-| `GH_IMAGE_TIMEOUT` | Default `gh image` wait for the upload URL (seconds) | `180` |
 | `AI_ALIGNED_GH_BIN` | Override path to the real `gh` (testing hook; unset in normal use) | (auto-detected) |
 
 ### PATH Configuration
