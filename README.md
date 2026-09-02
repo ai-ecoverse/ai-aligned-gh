@@ -207,6 +207,25 @@ gh impersonate --remove someorg/somerepo
 
 This is an explicit opt-in — the wrapper will still fail loudly for repos not in the list, so you always know when attribution is missing.
 
+### Skipping auth for specific commands (`gh allow-agent`)
+
+Some write operations are awkward to run through as-a-bot — adding a pull request to the merge queue is the usual example — and you may not want a device-flow prompt every time an agent does them. `gh allow-agent` is a command-level opt-in, the counterpart of `gh impersonate`:
+
+```bash
+# Skip as-a-bot authentication for merge-queue enqueue
+gh allow-agent pr merge --auto
+
+# See which commands are allowlisted
+gh allow-agent --list
+
+# Remove a command
+gh allow-agent --remove pr merge --auto
+```
+
+Allowlisted commands use your personal token and appear as you, not as a bot. Patterns match a subsequence of the invocation: `pr merge --auto` still matches `gh --repo owner/repo pr merge 42 --squash --auto`. Extra flags on the real command are fine; required flags in the pattern (`--auto` above) must be present.
+
+The allowlist is empty by default. Broad patterns such as `pr`, `api graphql`, and `auth token` are rejected so a single entry cannot disable attribution for an entire command family. Entries live in `~/.config/ai-aligned-gh/allowcommands`.
+
 ## 🖼️ Attaching Images (`--attach`)
 
 [gh 2.99.0](https://github.com/cli/cli/releases/tag/v2.99.0) attaches images and videos to issues, pull requests, and comments natively with the repeatable `--attach` flag:
@@ -313,6 +332,7 @@ The wrapper automatically detects:
 | `PR_TEMPLATE_CACHE_TTL` | PR template check cache lifetime (seconds) | `3600` |
 | `PR_TEMPLATE_CACHE_DIR` | PR template check cache directory | `~/.cache/ai-aligned-gh/pr-template-checks` |
 | `AI_ALIGNED_GH_BIN` | Override path to the real `gh` (testing hook; unset in normal use) | (auto-detected) |
+| `ALLOWCOMMANDS_FILE` | Override path to the command allowlist (testing hook; unset in normal use) | `~/.config/ai-aligned-gh/allowcommands` |
 
 ### PATH Configuration
 
@@ -487,6 +507,12 @@ gh impersonate owner/*
 ```
 
 This skips bot attribution for that repo. See `gh impersonate --list` to review.
+
+To skip as-a-bot authentication for one command rather than a whole repo (for example enqueueing a PR onto the merge queue):
+
+```bash
+gh allow-agent pr merge --auto
+```
 
 ### Token Exchange Fails
 
