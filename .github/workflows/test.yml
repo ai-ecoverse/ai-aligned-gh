@@ -46,3 +46,6 @@ jobs:
 
     - name: Run atomic install tests
       run: ./test_install_atomic.sh
+
+    - name: Run command allowlist tests
+      run: ./test_allow.sh

@@ -1233,6 +1233,196 @@ should_ignore_repo() {
     return 1
 }
 
+# --- BEGIN command allowlist ---
+# User-configured command patterns that skip as-a-bot token exchange and
+# run with the personal token instead. Same tradeoff as `gh impersonate`,
+# but scoped to a command rather than a repository. Empty by default;
+# nothing is bypassed until the user opts in with `gh allow-agent`.
+
+ALLOWCOMMANDS_FILE="${ALLOWCOMMANDS_FILE:-$HOME/.config/ai-aligned-gh/allowcommands}"
+
+# Trim leading and trailing whitespace without xargs (which glob-expands).
+_allowlist_trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# Return 0 if the gh argv in "$@" matches the allowlist pattern line in $1.
+# Positional pattern tokens (command, subcommand, and any other non-flags)
+# must appear in order as a subsequence of the invocation's non-flag tokens,
+# so `pr merge --auto` still matches `gh --repo owner/repo pr merge 42 --auto`.
+# Flag tokens in the pattern must all be present as exact argv tokens;
+# extra flags and arguments on the invocation are allowed.
+command_matches_allow_pattern() {
+    local pattern="$1"
+    shift
+    local -a pat_tokens=()
+    local -a pat_pos=()
+    local -a pat_flags=()
+    local -a inv_pos=()
+    local token p i found
+
+    pattern=$(_allowlist_trim "$pattern")
+    if [ -z "$pattern" ]; then
+        return 1
+    fi
+
+    # Word-split the stored pattern line. Patterns are written by `gh allow-agent`
+    # from argv, so tokens are already shell-word-split once.
+    read -r -a pat_tokens <<< "$pattern"
+
+    for token in "${pat_tokens[@]}"; do
+        case "$token" in
+            -*) pat_flags+=("$token") ;;
+            *)  pat_pos+=("$token") ;;
+        esac
+    done
+
+    if [ ${#pat_pos[@]} -eq 0 ]; then
+        return 1
+    fi
+
+    for token in "$@"; do
+        case "$token" in
+            -*) ;;
+            *)  inv_pos+=("$token") ;;
+        esac
+    done
+
+    i=0
+    for p in "${pat_pos[@]}"; do
+        found=1
+        while [ "$i" -lt ${#inv_pos[@]} ]; do
+            if [ "${inv_pos[$i]}" = "$p" ]; then
+                found=0
+                i=$((i + 1))
+                break
+            fi
+            i=$((i + 1))
+        done
+        if [ "$found" -ne 0 ]; then
+            return 1
+        fi
+    done
+
+    # Bash 3.2 (macOS) treats `"${arr[@]}"` as unbound when arr is empty
+    # under `set -u`. Skip the loop when the pattern has no flags.
+    if [ ${#pat_flags[@]} -gt 0 ]; then
+        for p in "${pat_flags[@]}"; do
+            found=1
+            for token in "$@"; do
+                if [ "$token" = "$p" ]; then
+                    found=0
+                    break
+                fi
+            done
+            if [ "$found" -ne 0 ]; then
+                return 1
+            fi
+        done
+    fi
+
+    return 0
+}
+
+# Reject patterns that would disable attribution for an entire command family
+# (e.g. `pr` matching every `gh pr *` write) or for `auth token`.
+validate_allow_pattern() {
+    local -a positionals=()
+    local token
+
+    if [ "$#" -eq 0 ]; then
+        echo "Usage: gh allow-agent <command>..." >&2
+        echo "Example: gh allow-agent pr merge --auto" >&2
+        return 1
+    fi
+
+    for token in "$@"; do
+        case "$token" in
+            -*) ;;
+            *)  positionals+=("$token") ;;
+        esac
+    done
+
+    if [ ${#positionals[@]} -eq 0 ]; then
+        echo "Pattern must include a command, not only flags." >&2
+        return 1
+    fi
+
+    if [ ${#positionals[@]} -eq 1 ]; then
+        case "${positionals[0]}" in
+            pr|issue|repo|release|gist|workflow|run|secret|variable|codespace|label|ruleset|project|stack|api|auth)
+                echo "Pattern '${positionals[0]}' is too broad. Specify a subcommand, e.g. 'pr merge --auto'." >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    if [ "${positionals[0]}" = "auth" ] && [ "${positionals[1]}" = "token" ]; then
+        echo "Cannot allowlist 'auth token': that command must always return the as-a-bot token when an AI tool is running." >&2
+        return 1
+    fi
+
+    if [ "${positionals[0]}" = "api" ] && {
+           [ "${positionals[1]}" = "graphql" ] || [ "${positionals[1]}" = "/graphql" ]
+       } && [ ${#positionals[@]} -eq 2 ]; then
+        echo "Pattern 'api graphql' is too broad (allows all mutations). Use a REST endpoint or a more specific command such as 'pr merge --auto'." >&2
+        return 1
+    fi
+
+    return 0
+}
+
+print_allow_usage() {
+    echo "Usage: gh allow-agent [<command>...]"
+    echo "       gh allow-agent --list"
+    echo "       gh allow-agent --remove <command>..."
+    echo ""
+    echo "Skip as-a-bot authentication for specific gh commands when an AI"
+    echo "tool is running. Allowlisted commands use your personal token."
+    echo ""
+    echo "Examples:"
+    echo "  gh allow-agent pr merge --auto     # add a PR to the merge queue"
+    echo "  gh allow-agent --list"
+    echo "  gh allow-agent --remove pr merge --auto"
+}
+
+is_allowlisted_operation() {
+    local config_file="$ALLOWCOMMANDS_FILE"
+    local pattern
+    local -a pattern_tokens
+
+    if [ ! -f "$config_file" ]; then
+        return 1
+    fi
+
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
+        if [[ -z "$pattern" ]] || [[ "$pattern" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        pattern=$(_allowlist_trim "$pattern")
+        if [ -z "$pattern" ]; then
+            continue
+        fi
+        # Re-validate on read so a hand-edited too-broad line (e.g. `pr`)
+        # cannot silently disable attribution.
+        pattern_tokens=()
+        read -r -a pattern_tokens <<< "$pattern"
+        if ! validate_allow_pattern "${pattern_tokens[@]}" 2>/dev/null; then
+            debug_log "Ignoring invalid allowlist pattern: $pattern"
+            continue
+        fi
+        if command_matches_allow_pattern "$pattern" "$@"; then
+            debug_log "Command matches allowlist pattern: $pattern"
+            return 0
+        fi
+    done < "$config_file"
+    return 1
+}
+# --- END command allowlist ---
+
 # Function to start device flow authentication
 start_device_flow() {
     local scopes="${1:-repo}"
@@ -1775,6 +1965,84 @@ if [ "$1" = "impersonate" ]; then
     exit 0
 fi
 
+# Handle `gh allow-agent` subcommand — per-command skip of as-a-bot token exchange
+if [ "$1" = "allow-agent" ]; then
+    ALLOW_FILE="$ALLOWCOMMANDS_FILE"
+
+    if [ -z "$2" ] || [ "$2" = "--list" ]; then
+        if [ ! -f "$ALLOW_FILE" ] || [ ! -s "$ALLOW_FILE" ]; then
+            echo "No commands in allowlist."
+            echo ""
+            echo "Use 'gh allow-agent <command>...' to skip as-a-bot authentication"
+            echo "for a command. Example: gh allow-agent pr merge --auto"
+        else
+            echo "Commands that skip as-a-bot authentication:"
+            echo ""
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [[ -n "$line" ]] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
+                    echo "  $line"
+                fi
+            done < "$ALLOW_FILE"
+            echo ""
+            echo "Use 'gh allow-agent --remove <command>...' to remove an entry."
+        fi
+        exit 0
+    fi
+
+    if [ "$2" = "-h" ] || [ "$2" = "--help" ]; then
+        print_allow_usage
+        exit 0
+    fi
+
+    if [ "$2" = "--remove" ]; then
+        if [ -z "$3" ]; then
+            echo "Usage: gh allow-agent --remove <command>..." >&2
+            echo "Example: gh allow-agent --remove pr merge --auto" >&2
+            exit 1
+        fi
+        ENTRY="${*:3}"
+        if [ ! -f "$ALLOW_FILE" ]; then
+            echo "Nothing to remove — allowlist is empty." >&2
+            exit 1
+        fi
+        if grep -qxF "$ENTRY" "$ALLOW_FILE"; then
+            grep -vxF "$ENTRY" "$ALLOW_FILE" > "${ALLOW_FILE}.tmp"
+            status=$?
+            if [ "$status" -gt 1 ]; then
+                echo "Error updating allowlist." >&2
+                rm -f "${ALLOW_FILE}.tmp"
+                exit 1
+            fi
+            mv "${ALLOW_FILE}.tmp" "$ALLOW_FILE"
+            echo "Removed '$ENTRY' from allowlist."
+        else
+            echo "'$ENTRY' is not in the allowlist." >&2
+            exit 1
+        fi
+        exit 0
+    fi
+
+    ENTRY="${*:2}"
+    if ! validate_allow_pattern "${@:2}"; then
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "$ALLOW_FILE")"
+
+    if [ -f "$ALLOW_FILE" ] && grep -qxF "$ENTRY" "$ALLOW_FILE"; then
+        echo "'$ENTRY' is already in the allowlist."
+        exit 0
+    fi
+
+    echo "$ENTRY" >> "$ALLOW_FILE"
+    echo "Added '$ENTRY' to allowlist."
+    echo ""
+    echo "AI invocations of this command will now use your personal token"
+    echo "instead of the as-a-bot app. Attribution will appear as you,"
+    echo "not as a bot acting on your behalf."
+    exit 0
+fi
+
 # Handle the retired `gh image` subcommand — point callers at gh's --attach
 if [ "$1" = "image" ]; then
     handle_image_command
@@ -1902,6 +2170,13 @@ fi
 # Check if this is a safe operation that doesn't need token exchange
 if is_safe_operation "$@"; then
     debug_log "Safe operation, skipping token exchange"
+    exec "$GH_BIN" "$@"
+fi
+
+# User-allowlisted write commands skip token exchange the same way.
+# Opt-in via `gh allow-agent`; empty by default so writes stay attributed.
+if is_allowlisted_operation "$@"; then
+    debug_log "Allowlisted operation, skipping token exchange"
     exec "$GH_BIN" "$@"
 fi
 
