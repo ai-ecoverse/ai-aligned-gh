@@ -732,412 +732,91 @@ is_issue_create_invocation() {
 }
 # --- END PR template safeguard ---
 
-# --- BEGIN gh image ---
-# `gh image <file>` uploads an image or video to an R2 bucket via the
-# as-a-bot image-upload flow and prints a serveable URL that can be embedded
-# in PR and issue bodies. gh itself cannot attach images (cli/cli#12960).
-#
-# Flow (design: as-a-bot docs/image-upload-design.md):
-#   1. Compute the SHA-256 content hash of the file.
-#   2. Dispatch the target repo's image-upload workflow with hash + extension.
-#      GitHub only allows users with write access to dispatch workflows, so
-#      minting an upload URL requires the same permission as pushing code.
-#   3. The workflow pre-signs a checksum-bound R2 PUT URL and registers it
-#      with the as-a-bot worker.
-#   4. Poll the worker until the pre-signed URL appears, upload the file,
-#      verify it is serveable, and print the serve URL (stdout is only the
-#      URL, so agents can capture it directly).
+# --- BEGIN gh image retirement ---
+# `gh image <file>` used to upload an image or video to an R2 bucket and print
+# a serveable URL, because gh could not attach media to issues and pull
+# requests (cli/cli#12960). gh 2.99.0 added a repeatable `--attach` flag to
+# `gh issue|pr create|edit|comment`, so the upload path is retired and the
+# command now only explains what to use instead.
+GH_ATTACH_MIN_VERSION="2.99.0"
 
-IMAGE_ALLOWED_EXTENSIONS="png jpg jpeg gif webp svg avif mp4 mov webm"
-IMAGE_WORKFLOW_FILE="${GH_IMAGE_WORKFLOW:-image-upload.yml}"
-
-image_content_type() {
-    case "$1" in
-        png)      echo "image/png" ;;
-        jpg|jpeg) echo "image/jpeg" ;;
-        gif)      echo "image/gif" ;;
-        webp)     echo "image/webp" ;;
-        svg)      echo "image/svg+xml" ;;
-        avif)     echo "image/avif" ;;
-        mp4)      echo "video/mp4" ;;
-        mov)      echo "video/quicktime" ;;
-        webm)     echo "video/webm" ;;
-        *)        echo "application/octet-stream" ;;
-    esac
+# Extract the semantic version from `gh --version` ("gh version 2.99.0 (...)").
+# Prints nothing when the version cannot be determined.
+gh_installed_version() {
+    "$GH_BIN" --version 2>/dev/null |
+        sed -n 's/^gh version \([0-9][0-9.]*\).*/\1/p' |
+        head -n 1
 }
 
-image_sha256_hex() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    else
-        return 1
-    fi
+# Compare dotted numeric versions: succeeds when $1 >= $2. Missing components
+# count as zero, so "2.99" and "2.99.0" compare equal.
+version_at_least() {
+    local have="$1" want="$2" h w
+    while [ -n "$have" ] || [ -n "$want" ]; do
+        h="${have%%.*}"
+        w="${want%%.*}"
+        case "$h" in ''|*[!0-9]*) h=0 ;; esac
+        case "$w" in ''|*[!0-9]*) w=0 ;; esac
+        if [ "$h" -gt "$w" ]; then
+            return 0
+        elif [ "$h" -lt "$w" ]; then
+            return 1
+        fi
+        case "$have" in *.*) have="${have#*.}" ;; *) have="" ;; esac
+        case "$want" in *.*) want="${want#*.}" ;; *) want="" ;; esac
+    done
+    return 0
 }
 
-# Convert a hex digest to base64 (value of the x-amz-checksum-sha256 header
-# the pre-signed URL requires).
-image_hex_to_base64() {
-    if command -v xxd >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then
-        printf '%s' "$1" | xxd -r -p | base64 | tr -d '\n'
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import sys, base64, binascii; print(base64.b64encode(binascii.unhexlify(sys.argv[1])).decode())' "$1"
-    elif command -v perl >/dev/null 2>&1; then
-        perl -MMIME::Base64 -e 'print encode_base64(pack("H*", $ARGV[0]), "")' "$1"
-    else
-        return 1
-    fi
+gh_supports_attach() {
+    local version
+    version=$(gh_installed_version)
+    [ -n "$version" ] || return 1
+    version_at_least "$version" "$GH_ATTACH_MIN_VERSION"
 }
 
-# Escape HTML attribute metacharacters — the alt text derives from the
-# filename, which may contain ", <, >, or &.
-image_html_escape() {
-    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
-}
-
-# Print the final result: bare URL by default, or ready-to-paste markup.
-# Images use image markup; videos use links because GitHub rejects external
-# video through camo and strips external <video> elements from comments.
-image_format_output() {
-    local format="$1" base="$2" url="$3" ext="$4"
-    local alt="${base%.*}"
-
-    case "$ext" in
-        mp4|mov|webm)
-            case "$format" in
-                markdown)
-                    echo "[${base}](${url})"
-                    ;;
-                html)
-                    echo "<a href=\"$(image_html_escape "$url")\">$(image_html_escape "$base")</a>"
-                    ;;
-                *)
-                    echo "$url"
-                    ;;
-            esac
-            return
-            ;;
-    esac
-
-    case "$format" in
-        markdown)
-            echo "![${alt}](${url})"
-            ;;
-        html)
-            echo "<img src=\"$(image_html_escape "$url")\" alt=\"$(image_html_escape "$alt")\">"
-            ;;
-        *)
-            echo "$url"
-            ;;
-    esac
-}
-
-image_usage() {
-    cat <<EOF
-Upload an image or video and print a serveable URL for PR/issue Markdown.
-
-USAGE
-  gh image <file> [flags]
-
-FLAGS
-  -R, --repo <owner/repo>   Target repository (default: current directory)
-      --timeout <seconds>   How long to wait for the upload URL (default: 180)
-  -m, --markdown            Print ready-to-embed Markdown instead of the bare
-                            URL. Images use ![<name>](<url>); videos use
-                            [<filename>](<url>).
-      --html                Print an HTML tag instead of the bare URL:
-                            <img> for images; a labelled <a> link for videos.
-  -h, --help                Show this help
-
-EXAMPLES
-  gh image screenshot.png
-  gh pr comment 42 --body "Before/after: \$(gh image --markdown after.png)"
-
-SUPPORTED FILE TYPES
-  $IMAGE_ALLOWED_EXTENSIONS
-
-SETUP (one-time, per repository)
-  Install the as-a-bot GitHub App: https://github.com/apps/as-a-bot
-  The app commits the image-upload workflow automatically — no secrets
-  or other configuration are needed in the repository.
-
-The upload is gated on repository write access: gh image dispatches the
-repo's image-upload workflow, and GitHub only lets collaborators with write
-access do that. Files are stored content-addressed (owner/repo/<sha256>.<ext>),
-so re-uploading the same file returns the same URL instantly. Uploads are
-kept for 90 days; re-running gh image on the same file renews the URL.
-EOF
+# Print the `--attach` examples both the retirement error and the create-time
+# tip use, so the guidance stays identical in every place it appears.
+print_attach_examples() {
+    echo "    gh issue create --attach ./repro.png" >&2
+    echo "    gh issue comment 123 --attach ./repro.png" >&2
+    echo "    gh pr create --attach ./before.png" >&2
+    echo "    gh pr comment 456 --attach ./result.mp4" >&2
 }
 
 handle_image_command() {
-    local file="" repo_spec="" timeout="${GH_IMAGE_TIMEOUT:-180}"
-    local poll_interval=3
-    local output_format="url"
+    local version
+    version=$(gh_installed_version)
 
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            -h|--help)
-                image_usage
-                exit 0
-                ;;
-            -m|--markdown)
-                if [ "$output_format" = "html" ]; then
-                    echo "Error: --markdown and --html are mutually exclusive" >&2
-                    exit 1
-                fi
-                output_format="markdown"
-                shift
-                ;;
-            --html)
-                if [ "$output_format" = "markdown" ]; then
-                    echo "Error: --markdown and --html are mutually exclusive" >&2
-                    exit 1
-                fi
-                output_format="html"
-                shift
-                ;;
-            -R|--repo)
-                if [ $# -lt 2 ]; then
-                    echo "Error: $1 requires a value" >&2
-                    exit 1
-                fi
-                repo_spec="$2"
-                shift 2
-                ;;
-            --repo=*)
-                repo_spec="${1#--repo=}"
-                shift
-                ;;
-            --timeout)
-                if [ $# -lt 2 ]; then
-                    echo "Error: $1 requires a value" >&2
-                    exit 1
-                fi
-                timeout="$2"
-                shift 2
-                ;;
-            --timeout=*)
-                timeout="${1#--timeout=}"
-                shift
-                ;;
-            -*)
-                echo "Error: unknown flag: $1" >&2
-                echo "" >&2
-                image_usage >&2
-                exit 1
-                ;;
-            *)
-                if [ -n "$file" ]; then
-                    echo "Error: unexpected argument: $1" >&2
-                    exit 1
-                fi
-                file="$1"
-                shift
-                ;;
-        esac
-    done
-
-    if [ -z "$file" ]; then
-        image_usage >&2
-        exit 1
-    fi
-
-    # Timeout drives arithmetic comparisons below — reject anything that
-    # is not a positive integer before entering the polling loop.
-    case "$timeout" in
-        ''|*[!0-9]*)
-            echo "Error: --timeout must be a positive integer (got: '$timeout')" >&2
-            exit 1
-            ;;
-    esac
-    if [ "$timeout" -le 0 ]; then
-        echo "Error: --timeout must be a positive integer (got: '$timeout')" >&2
-        exit 1
-    fi
-
-    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-        echo "Error: file not found or not readable: $file" >&2
-        exit 1
-    fi
-
-    for tool in curl jq; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            echo "Error: gh image requires '$tool' to be installed" >&2
-            exit 1
-        fi
-    done
-
-    local base ext
-    base=$(basename "$file")
-    case "$base" in
-        *.*)
-            ext=$(echo "${base##*.}" | tr '[:upper:]' '[:lower:]')
-            ;;
-        *)
-            echo "Error: file has no extension: $file" >&2
-            exit 1
-            ;;
-    esac
-    case " $IMAGE_ALLOWED_EXTENSIONS " in
-        *" $ext "*) ;;
-        *)
-            echo "Error: unsupported file type '.$ext'" >&2
-            echo "Supported: $IMAGE_ALLOWED_EXTENSIONS" >&2
-            exit 1
-            ;;
-    esac
-
-    local hash hash_b64
-    if ! hash=$(image_sha256_hex "$file"); then
-        echo "Error: gh image requires sha256sum or shasum" >&2
-        exit 1
-    fi
-    if ! hash_b64=$(image_hex_to_base64 "$hash"); then
-        echo "Error: gh image requires xxd, python3, or perl to encode the checksum" >&2
-        exit 1
-    fi
-
-    local owner repo
-    if ! read -r owner repo < <(get_repo_info "$repo_spec"); then
-        echo "Error: could not determine the target repository." >&2
-        echo "Run gh image inside a repository or pass --repo owner/repo." >&2
-        exit 1
-    fi
-
-    local serve_url="$BROKER_URL/i/$owner/$repo/$hash.$ext"
-
-    # Content-addressed dedupe: identical content is already served.
-    if curl -sfI "$serve_url" >/dev/null 2>&1; then
-        debug_log "Content already uploaded, returning existing URL"
-        image_format_output "$output_format" "$base" "$serve_url" "$ext"
-        exit 0
-    fi
-
-    # Use the as-a-bot token for the workflow dispatch when an AI tool is
-    # driving — the same attribution rules as every other write operation.
-    local dispatch_token=""
-    AI_TOOL=$(detect_ai_tool)
-    if [ "$AI_TOOL" != "none" ] && ! should_ignore_repo "$owner" "$repo"; then
-        dispatch_token=$(get_cached_token)
-        if [ -z "$dispatch_token" ]; then
-            echo "[ERROR] as-a-bot authentication required before dispatching the upload workflow." >&2
-            echo "        Authorize the app (see instructions above), then try again." >&2
-            exit 1
-        fi
-    fi
-
-    echo "Requesting upload URL via $IMAGE_WORKFLOW_FILE in $owner/$repo..." >&2
-    local dispatch_output dispatch_status
-    if [ -n "$dispatch_token" ]; then
-        dispatch_output=$(GH_TOKEN="$dispatch_token" "$GH_BIN" workflow run "$IMAGE_WORKFLOW_FILE" \
-            --repo "$owner/$repo" -f "hash=$hash" -f "ext=$ext" 2>&1)
+    echo "Error: 'gh image' has been retired." >&2
+    echo "" >&2
+    if gh_supports_attach; then
+        echo "  gh $version attaches images and videos natively. Use the" >&2
+        echo "  repeatable --attach flag instead:" >&2
+        echo "" >&2
+        print_attach_examples
+        echo "" >&2
+        echo "  Repeat --attach to attach several files. Add '#alt text' after" >&2
+        echo "  the path to set the description: --attach './shot.png#Error state'" >&2
     else
-        dispatch_output=$("$GH_BIN" workflow run "$IMAGE_WORKFLOW_FILE" \
-            --repo "$owner/$repo" -f "hash=$hash" -f "ext=$ext" 2>&1)
-    fi
-    dispatch_status=$?
-    if [ $dispatch_status -ne 0 ]; then
-        echo "" >&2
-        echo "=================================================================" >&2
-        echo "  Image Upload Workflow Could Not Be Dispatched" >&2
-        echo "=================================================================" >&2
-        echo "" >&2
-        echo "  Repository: $owner/$repo" >&2
-        echo "" >&2
-        echo "  gh image needs the '$IMAGE_WORKFLOW_FILE' workflow in the target" >&2
-        echo "  repository, and you need write access to dispatch it." >&2
-        echo "" >&2
-        echo "  One-time setup for the repository:" >&2
-        echo "  Install the as-a-bot GitHub App on $owner/$repo:" >&2
-        echo "    https://github.com/apps/as-a-bot" >&2
-        echo "  The app commits the workflow automatically — no secrets needed." >&2
-        echo "  (Manual alternative: copy templates/image-upload.yml from" >&2
-        echo "  https://github.com/ai-ecoverse/as-a-bot to .github/workflows/)" >&2
-        echo "" >&2
-        echo "  Original error:" >&2
-        echo "  $dispatch_output" >&2
-        echo "" >&2
-        exit 1
-    fi
-
-    local status_url="$BROKER_URL/image-upload/status?owner=$owner&repo=$repo&hash=$hash&ext=$ext"
-    local start_time now elapsed response status upload_url response_serve
-    start_time=$(date +%s)
-    echo "Waiting for pre-signed upload URL (timeout: ${timeout}s)..." >&2
-
-    while true; do
-        response=$(curl -sS "$status_url" 2>/dev/null)
-        status=$(echo "$response" | jq -r '.status // empty' 2>/dev/null)
-
-        # Prefer the worker's serve URL over the locally constructed one —
-        # it may live on the embeddable wildcard domain
-        # (repo--owner.<domain>) instead of the workers.dev host.
-        response_serve=$(echo "$response" | jq -r '.serve_url // empty' 2>/dev/null)
-
-        case "$status" in
-            uploaded)
-                # The identical content landed in the bucket already.
-                [ -n "$response_serve" ] && serve_url="$response_serve"
-                image_format_output "$output_format" "$base" "$serve_url" "$ext"
-                exit 0
-                ;;
-            ready)
-                [ -n "$response_serve" ] && serve_url="$response_serve"
-                break
-                ;;
-        esac
-
-        now=$(date +%s)
-        elapsed=$((now - start_time))
-        if [ "$elapsed" -ge "$timeout" ]; then
-            echo "" >&2
-            echo "Error: timed out after ${timeout}s waiting for the upload URL." >&2
-            echo "Check the workflow run:  gh run list --workflow $IMAGE_WORKFLOW_FILE --repo $owner/$repo" >&2
-            exit 1
+        echo "  gh $GH_ATTACH_MIN_VERSION or newer attaches images and videos natively" >&2
+        if [ -n "$version" ]; then
+            echo "  via the repeatable --attach flag. You have gh $version." >&2
+        else
+            echo "  via the repeatable --attach flag, but your gh version could not" >&2
+            echo "  be determined." >&2
         fi
-        sleep "$poll_interval"
-    done
-
-    upload_url=$(echo "$response" | jq -r '.upload_url // empty')
-    if [ -z "$upload_url" ]; then
-        echo "Error: worker returned a ready status without an upload URL" >&2
-        exit 1
+        echo "" >&2
+        echo "  Update gh, then use --attach:" >&2
+        echo "" >&2
+        print_attach_examples
     fi
-
-    # Send the headers the pre-signed URL was signed for (at minimum the
-    # checksum header that binds the upload to this exact content).
-    local -a header_args=()
-    local header_line
-    while IFS= read -r header_line; do
-        [ -n "$header_line" ] && header_args+=(-H "$header_line")
-    done < <(echo "$response" | jq -r '(.upload_headers // {}) | to_entries[] | "\(.key): \(.value)"' 2>/dev/null)
-    if [ ${#header_args[@]} -eq 0 ]; then
-        header_args=(-H "x-amz-checksum-sha256: $hash_b64")
-    fi
-    header_args+=(-H "Content-Type: $(image_content_type "$ext")")
-
-    echo "Uploading $base ($(wc -c < "$file" | tr -d ' ') bytes)..." >&2
-    if ! curl -sSf -X PUT --upload-file "$file" "${header_args[@]}" "$upload_url" -o /dev/null; then
-        echo "Error: upload failed (the pre-signed URL may have expired — try again)" >&2
-        exit 1
-    fi
-
-    # Verify the object is actually serveable before reporting success.
-    local verify_attempt=0
-    while ! curl -sfI "$serve_url" >/dev/null 2>&1; do
-        verify_attempt=$((verify_attempt + 1))
-        if [ "$verify_attempt" -ge 3 ]; then
-            echo "Error: upload completed but the file is not serveable at $serve_url" >&2
-            exit 1
-        fi
-        sleep 1
-    done
-
-    image_format_output "$output_format" "$base" "$serve_url" "$ext"
-    exit 0
+    echo "" >&2
+    echo "  Docs: https://gh.io/gh-attach" >&2
+    echo "" >&2
+    exit 1
 }
-# --- END gh image ---
+# --- END gh image retirement ---
 
 # Function to find the real gh executable
 find_real_gh() {
@@ -2096,10 +1775,9 @@ if [ "$1" = "impersonate" ]; then
     exit 0
 fi
 
-# Handle `gh image` subcommand — upload an image/video, print a serveable URL
+# Handle the retired `gh image` subcommand — point callers at gh's --attach
 if [ "$1" = "image" ]; then
-    shift
-    handle_image_command "$@"
+    handle_image_command
     # handle_image_command always exits
 fi
 
@@ -2163,17 +1841,23 @@ if [ "$1" = "api" ]; then
     fi
 fi
 
-# gh image hint: agents composing a PR or issue often want to include a
-# screenshot or recording but assume gh cannot attach images (cli/cli#12960).
-# Point them at gh image at exactly the moment it is useful. Informational
-# only — never blocks the command.
+# Attachment hint: agents composing a PR or issue often want to include a
+# screenshot or recording but assume gh cannot attach media (true before gh
+# 2.99.0). Point them at --attach at exactly the moment it is useful.
+# Informational only — never blocks the command.
 if is_pr_create_invocation "$@" || is_issue_create_invocation "$@"; then
-    echo "" >&2
-    echo "[TIP] Need to include a screenshot, image, or video? Upload it first:" >&2
-    echo "        gh image <file>     # prints a URL, embed it as Markdown:" >&2
-    echo "        ![description](url)" >&2
-    echo "      Run 'gh image --help' for details." >&2
-    echo "" >&2
+    if gh_supports_attach; then
+        echo "" >&2
+        echo "[TIP] Need to include a screenshot, image, or video? Attach it:" >&2
+        echo "        --attach ./shot.png            # repeat for several files" >&2
+        echo "        --attach './shot.png#Alt text' # with a description" >&2
+        echo "" >&2
+    else
+        echo "" >&2
+        echo "[TIP] Screenshots, images, and videos can be attached with --attach" >&2
+        echo "      in gh $GH_ATTACH_MIN_VERSION or newer. Update gh to use it." >&2
+        echo "" >&2
+    fi
 fi
 
 # PR template safeguard: block `gh pr create` until the agent has verified

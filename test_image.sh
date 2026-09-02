@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Test script for the `gh image` subcommand
-# Verifies help, argument validation, content-addressed dedupe, and the
-# full dispatch → poll → upload → verify flow using fake curl/gh binaries.
+# Test script for the retired `gh image` subcommand
+# Verifies the version check, both error messages, and the --attach tip shown
+# on pr/issue create, using a fake gh whose reported version is configurable.
 
 set -e
 
@@ -34,20 +34,16 @@ print_fail() {
     FAILURES=$((FAILURES + 1))
 }
 
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $*"
-}
-
 FAILURES=0
 
 echo ""
-echo -e "${BLUE}=== gh image Test Suite ===${NC}"
+echo -e "${BLUE}=== gh image retirement Test Suite ===${NC}"
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GH_WRAPPER="$SCRIPT_DIR/executable_gh"
 
-# Isolated HOME + workspace with fake binaries
+# Isolated HOME + workspace with a fake gh
 HOME=$(mktemp -d)
 export HOME
 WORK=$(mktemp -d)
@@ -58,302 +54,32 @@ STATE="$WORK/state"
 mkdir -p "$FAKEBIN" "$STATE"
 export FAKE_STATE="$STATE"
 
-# Fake curl: simulates the as-a-bot worker + R2
-cat > "$FAKEBIN/curl" <<'FAKE'
-#!/bin/bash
-args="$*"
-case "$args" in
-    *image-upload/status*)
-        if [ -f "$FAKE_STATE/pending" ]; then
-            echo '{"status":"pending"}'
-        else
-            checksum=$(cat "$FAKE_STATE/checksum" 2>/dev/null || echo "unset")
-            serve=""
-            if [ -f "$FAKE_STATE/serve_override" ]; then
-                serve=",\"serve_url\":\"$(cat "$FAKE_STATE/serve_override")\""
-            fi
-            echo "{\"status\":\"ready\",\"upload_url\":\"https://acc.r2.cloudflarestorage.com/bucket/key?sig=1\",\"upload_headers\":{\"x-amz-checksum-sha256\":\"$checksum\"}$serve}"
-        fi
-        exit 0
-        ;;
-esac
-if echo "$args" | grep -q "PUT"; then
-    echo "$args" > "$FAKE_STATE/put_args"
-    exit 0
-fi
-# HEAD probe (dedupe before upload, verification after)
-if echo "$args" | grep -q -- "-sfI"; then
-    if [ -f "$FAKE_STATE/head_ok" ] || [ -f "$FAKE_STATE/put_args" ]; then
-        exit 0
-    fi
-    exit 22
-fi
-exit 0
-FAKE
-chmod +x "$FAKEBIN/curl"
-
-# Fake gh: records workflow dispatches
+# Fake gh: reports whatever version the test wrote to $FAKE_STATE/version
 cat > "$FAKEBIN/gh" <<'FAKE'
 #!/bin/bash
-if [ "$1" = "workflow" ] && [ "$2" = "run" ]; then
-    echo "$@" > "$FAKE_STATE/workflow_args"
+if [ "$1" = "--version" ]; then
+    version=$(cat "$FAKE_STATE/version" 2>/dev/null || true)
+    if [ -n "$version" ]; then
+        echo "gh version $version (2026-09-01)"
+        echo "https://github.com/cli/cli/releases/tag/v$version"
+    fi
     exit 0
 fi
 exit 0
 FAKE
 chmod +x "$FAKEBIN/gh"
 
-run_image() {
+set_gh_version() {
+    printf '%s' "$1" > "$STATE/version"
+}
+
+run_wrapper() {
     AMI_PASSTHROUGH=true \
     AS_A_BOT_URL="https://broker.test" \
     AI_ALIGNED_GH_BIN="$FAKEBIN/gh" \
     PATH="$FAKEBIN:$PATH" \
-    "$GH_WRAPPER" image "$@"
+    "$GH_WRAPPER" "$@"
 }
-
-# Hex-to-base64 with the same fallbacks the wrapper uses
-hex_to_b64() {
-    if command -v xxd >/dev/null 2>&1; then
-        printf '%s' "$1" | xxd -r -p | base64 | tr -d '\n'
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import sys, base64, binascii; print(base64.b64encode(binascii.unhexlify(sys.argv[1])).decode())' "$1"
-    else
-        perl -MMIME::Base64 -e 'print encode_base64(pack("H*", $ARGV[0]), "")' "$1"
-    fi
-}
-
-# Test fixture: a small "png"
-TEST_FILE="$WORK/shot.png"
-printf 'not-really-a-png' > "$TEST_FILE"
-HASH=$(sha256sum "$TEST_FILE" | awk '{print $1}')
-HASH_B64=$(hex_to_b64 "$HASH")
-if [ -z "$HASH_B64" ]; then
-    echo "Could not compute base64 checksum (need xxd, python3, or perl)" >&2
-    exit 1
-fi
-SERVE_URL="https://broker.test/i/testowner/testrepo/$HASH.png"
-
-# Test 1: --help prints usage
-print_test "--help prints usage"
-output=$(run_image --help 2>&1)
-if echo "$output" | grep -q "USAGE" && echo "$output" | grep -q "gh image <file>"; then
-    print_pass "--help shows usage"
-else
-    print_fail "--help did not show usage. Got: $output"
-fi
-
-# Test 2: no arguments fails with usage
-print_test "No arguments fails with usage"
-if output=$(run_image 2>&1); then
-    print_fail "Expected non-zero exit for missing file"
-else
-    if echo "$output" | grep -q "USAGE"; then
-        print_pass "Missing file shows usage and fails"
-    else
-        print_fail "Missing file did not show usage. Got: $output"
-    fi
-fi
-
-# Test 3: nonexistent file fails
-print_test "Nonexistent file fails"
-if output=$(run_image /does/not/exist.png 2>&1); then
-    print_fail "Expected non-zero exit for nonexistent file"
-else
-    if echo "$output" | grep -q "not found"; then
-        print_pass "Nonexistent file rejected"
-    else
-        print_fail "Wrong error for nonexistent file. Got: $output"
-    fi
-fi
-
-# Test 4: unsupported extension fails
-print_test "Unsupported extension fails"
-printf 'x' > "$WORK/evil.exe"
-if output=$(run_image "$WORK/evil.exe" --repo testowner/testrepo 2>&1); then
-    print_fail "Expected non-zero exit for .exe"
-else
-    if echo "$output" | grep -q "unsupported file type"; then
-        print_pass ".exe rejected"
-    else
-        print_fail "Wrong error for .exe. Got: $output"
-    fi
-fi
-
-# Test 5: file without extension fails
-print_test "File without extension fails"
-printf 'x' > "$WORK/noext"
-if output=$(run_image "$WORK/noext" --repo testowner/testrepo 2>&1); then
-    print_fail "Expected non-zero exit for extensionless file"
-else
-    if echo "$output" | grep -q "no extension"; then
-        print_pass "Extensionless file rejected"
-    else
-        print_fail "Wrong error for extensionless file. Got: $output"
-    fi
-fi
-
-# Test 5b: invalid --timeout values fail
-print_test "Invalid --timeout values fail"
-if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --timeout abc 2>&1); then
-    print_fail "Expected non-zero exit for --timeout abc"
-else
-    if echo "$output" | grep -q "positive integer"; then
-        print_pass "Non-numeric timeout rejected"
-    else
-        print_fail "Wrong error for non-numeric timeout. Got: $output"
-    fi
-fi
-if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --timeout 0 2>&1); then
-    print_fail "Expected non-zero exit for --timeout 0"
-else
-    if echo "$output" | grep -q "positive integer"; then
-        print_pass "Zero timeout rejected"
-    else
-        print_fail "Wrong error for zero timeout. Got: $output"
-    fi
-fi
-
-# Test 6: content-addressed dedupe returns URL without dispatching
-print_test "Dedupe: already-uploaded content returns URL immediately"
-touch "$STATE/head_ok"
-output=$(run_image "$TEST_FILE" --repo testowner/testrepo 2>/dev/null)
-if [ "$output" = "$SERVE_URL" ]; then
-    print_pass "Dedupe returned the content-addressed URL"
-else
-    print_fail "Dedupe URL mismatch. Expected: $SERVE_URL Got: $output"
-fi
-if [ ! -f "$STATE/workflow_args" ]; then
-    print_pass "Dedupe did not dispatch the workflow"
-else
-    print_fail "Dedupe dispatched the workflow unexpectedly"
-fi
-rm -f "$STATE/head_ok"
-
-# Test 6b: --markdown emits ready-to-embed Markdown
-print_test "--markdown emits embeddable Markdown"
-touch "$STATE/head_ok"
-output=$(run_image "$TEST_FILE" --repo testowner/testrepo --markdown 2>/dev/null)
-if [ "$output" = "![shot]($SERVE_URL)" ]; then
-    print_pass "--markdown wrapped the URL in image Markdown"
-else
-    print_fail "--markdown output wrong. Expected: ![shot]($SERVE_URL) Got: $output"
-fi
-
-# Test 6c: --html emits an <img> tag
-print_test "--html emits an <img> tag"
-output=$(run_image "$TEST_FILE" --repo testowner/testrepo --html 2>/dev/null)
-if [ "$output" = "<img src=\"$SERVE_URL\" alt=\"shot\">" ]; then
-    print_pass "--html wrapped the URL in an img tag"
-else
-    print_fail "--html output wrong. Got: $output"
-fi
-
-# Test 6d: --html escapes attribute metacharacters in the alt text
-print_test "--html escapes filename-derived alt text"
-WEIRD_FILE="$WORK/we\"ird & <file>.png"
-cp "$TEST_FILE" "$WEIRD_FILE"
-output=$(run_image "$WEIRD_FILE" --repo testowner/testrepo --html 2>/dev/null)
-if echo "$output" | grep -qF 'alt="we&quot;ird &amp; &lt;file&gt;"'; then
-    print_pass "alt text is HTML-escaped"
-else
-    print_fail "alt text not escaped. Got: $output"
-fi
-rm -f "$WEIRD_FILE"
-
-# Tests 6e-6f: every video type uses labelled links, never media markup
-for video_ext in mp4 mov webm; do
-    VIDEO_FILE="$WORK/demo.$video_ext"
-    VIDEO_URL="https://broker.test/i/testowner/testrepo/$HASH.$video_ext"
-    cp "$TEST_FILE" "$VIDEO_FILE"
-
-    print_test "Video .$video_ext --markdown emits a labelled link"
-    output=$(run_image "$VIDEO_FILE" --repo testowner/testrepo --markdown 2>/dev/null)
-    if [ "$output" = "[demo.$video_ext]($VIDEO_URL)" ]; then
-        print_pass "Video .$video_ext --markdown emitted a labelled link"
-    else
-        print_fail "Video .$video_ext --markdown output wrong. Got: $output"
-    fi
-
-    print_test "Video .$video_ext --html emits a labelled anchor"
-    output=$(run_image "$VIDEO_FILE" --repo testowner/testrepo --html 2>/dev/null)
-    if [ "$output" = "<a href=\"$VIDEO_URL\">demo.$video_ext</a>" ]; then
-        print_pass "Video .$video_ext --html emitted a labelled anchor"
-    else
-        print_fail "Video .$video_ext --html output wrong. Got: $output"
-    fi
-    if echo "$output" | grep -Eq '<(img|video)( |>)'; then
-        print_fail "Video .$video_ext --html emitted media markup. Got: $output"
-    else
-        print_pass "Video .$video_ext --html avoided stripped or broken media markup"
-    fi
-done
-
-# Test 6g: --markdown and --html are mutually exclusive
-print_test "--markdown and --html together fail"
-if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --markdown --html 2>&1); then
-    print_fail "Expected non-zero exit for conflicting format flags"
-else
-    if echo "$output" | grep -q "mutually exclusive"; then
-        print_pass "Conflicting format flags rejected"
-    else
-        print_fail "Wrong error for conflicting flags. Got: $output"
-    fi
-fi
-rm -f "$STATE/head_ok"
-
-# Test 7: full flow — dispatch, poll, upload, verify
-print_test "Full flow: dispatch, poll, upload, verify"
-printf '%s' "$HASH_B64" > "$STATE/checksum"
-output=$(run_image "$TEST_FILE" --repo testowner/testrepo 2>/dev/null)
-if [ "$output" = "$SERVE_URL" ]; then
-    print_pass "Full flow printed the serve URL"
-else
-    print_fail "Full flow URL mismatch. Expected: $SERVE_URL Got: $output"
-fi
-if [ -f "$STATE/workflow_args" ] && grep -q "workflow run image-upload.yml --repo testowner/testrepo -f hash=$HASH -f ext=png" "$STATE/workflow_args"; then
-    print_pass "Workflow dispatched with hash and extension"
-else
-    print_fail "Workflow dispatch args wrong. Got: $(cat "$STATE/workflow_args" 2>/dev/null)"
-fi
-if [ -f "$STATE/put_args" ] && grep -q "x-amz-checksum-sha256: $HASH_B64" "$STATE/put_args"; then
-    print_pass "Upload sent the checksum header from the offer"
-else
-    print_fail "Upload missing checksum header. Got: $(cat "$STATE/put_args" 2>/dev/null)"
-fi
-if grep -q "Content-Type: image/png" "$STATE/put_args" 2>/dev/null; then
-    print_pass "Upload sent the right Content-Type"
-else
-    print_fail "Upload missing Content-Type header"
-fi
-rm -f "$STATE/workflow_args" "$STATE/put_args"
-
-# Test 7b: worker-provided serve_url (wildcard domain) wins over the
-# locally constructed one
-print_test "Worker serve_url override is preferred"
-WILDCARD_URL="https://testrepo--testowner.img.test/$HASH.png"
-printf '%s' "$WILDCARD_URL" > "$STATE/serve_override"
-printf '%s' "$HASH_B64" > "$STATE/checksum"
-output=$(run_image "$TEST_FILE" --repo testowner/testrepo 2>/dev/null)
-if [ "$output" = "$WILDCARD_URL" ]; then
-    print_pass "Printed the worker's wildcard serve URL"
-else
-    print_fail "Expected: $WILDCARD_URL Got: $output"
-fi
-rm -f "$STATE/serve_override" "$STATE/workflow_args" "$STATE/put_args"
-
-# Test 8: timeout when the worker never provides a URL
-print_test "Timeout when the offer never arrives"
-touch "$STATE/pending"
-if output=$(run_image "$TEST_FILE" --repo testowner/testrepo --timeout 1 2>&1); then
-    print_fail "Expected non-zero exit on timeout"
-else
-    if echo "$output" | grep -q "timed out"; then
-        print_pass "Timed out with a helpful error"
-    else
-        print_fail "Wrong timeout error. Got: $output"
-    fi
-fi
-rm -f "$STATE/pending" "$STATE/workflow_args"
 
 # Runner that simulates an AI agent (Claude env var, no passthrough)
 run_ai() {
@@ -364,28 +90,119 @@ run_ai() {
     "$GH_WRAPPER" "$@"
 }
 
-# Test 9: AI agents get a gh image tip on pr create
-print_test "gh pr create shows the gh image tip for AI agents"
+# Test 1: gh >= 2.99.0 — point at --attach
+print_test "gh 2.99.0 gets the --attach message"
+set_gh_version "2.99.0"
+if output=$(run_wrapper image shot.png 2>&1); then
+    print_fail "Expected non-zero exit for gh image"
+else
+    if echo "$output" | grep -q "has been retired" &&
+       echo "$output" | grep -q -- "--attach ./before.png" &&
+       ! echo "$output" | grep -qi "update gh"; then
+        print_pass "Retired message told the caller to use --attach"
+    else
+        print_fail "Wrong message for gh 2.99.0. Got: $output"
+    fi
+fi
+
+# Test 1b: newer versions are also recognized
+print_test "gh 2.100.0 is recognized as supporting --attach"
+set_gh_version "2.100.0"
+if output=$(run_wrapper image shot.png 2>&1); then
+    print_fail "Expected non-zero exit for gh image"
+else
+    if echo "$output" | grep -q -- "--attach" && ! echo "$output" | grep -qi "Update gh"; then
+        print_pass "2.100.0 compared greater than 2.99.0"
+    else
+        print_fail "2.100.0 misread as older. Got: $output"
+    fi
+fi
+
+print_test "gh 3.0.0 is recognized as supporting --attach"
+set_gh_version "3.0.0"
+if output=$(run_wrapper image shot.png 2>&1); then
+    print_fail "Expected non-zero exit for gh image"
+else
+    if echo "$output" | grep -q -- "--attach" && ! echo "$output" | grep -qi "Update gh"; then
+        print_pass "3.0.0 compared greater than 2.99.0"
+    else
+        print_fail "3.0.0 misread as older. Got: $output"
+    fi
+fi
+
+# Test 2: gh < 2.99.0 — tell the caller to update first
+print_test "gh 2.98.0 is told to update, then use --attach"
+set_gh_version "2.98.0"
+if output=$(run_wrapper image shot.png 2>&1); then
+    print_fail "Expected non-zero exit for gh image"
+else
+    if echo "$output" | grep -q "has been retired" &&
+       echo "$output" | grep -q "Update gh" &&
+       echo "$output" | grep -q "You have gh 2.98.0" &&
+       echo "$output" | grep -q -- "--attach ./before.png"; then
+        print_pass "Older gh got the update-then-attach message"
+    else
+        print_fail "Wrong message for gh 2.98.0. Got: $output"
+    fi
+fi
+
+# Test 3: unknown version is treated as too old
+print_test "Undetectable gh version is treated as too old"
+set_gh_version ""
+if output=$(run_wrapper image shot.png 2>&1); then
+    print_fail "Expected non-zero exit for gh image"
+else
+    if echo "$output" | grep -q "could not" && echo "$output" | grep -q "Update gh"; then
+        print_pass "Unknown version got the update message"
+    else
+        print_fail "Wrong message for unknown version. Got: $output"
+    fi
+fi
+
+# Test 4: no upload happens — nothing is printed on stdout
+print_test "gh image prints nothing on stdout"
+set_gh_version "2.99.0"
+output=$(run_wrapper image shot.png 2>/dev/null || true)
+if [ -z "$output" ]; then
+    print_pass "stdout stayed empty"
+else
+    print_fail "Expected empty stdout. Got: $output"
+fi
+
+# Test 5: AI agents get the --attach tip on pr create
+print_test "gh pr create shows the --attach tip for AI agents"
+set_gh_version "2.99.0"
 output=$(run_ai pr create --repo testowner/testrepo --title t --body b 2>&1 || true)
-if echo "$output" | grep -q "gh image <file>"; then
-    print_pass "pr create surfaced the gh image tip"
+if echo "$output" | grep -q -- "--attach ./shot.png"; then
+    print_pass "pr create surfaced the --attach tip"
 else
     print_fail "pr create did not surface the tip. Got: $output"
 fi
 
-# Test 10: AI agents get a gh image tip on issue create
-print_test "gh issue create shows the gh image tip for AI agents"
+# Test 6: AI agents get the --attach tip on issue create
+print_test "gh issue create shows the --attach tip for AI agents"
 output=$(run_ai issue create --repo testowner/testrepo --title t --body b 2>&1 || true)
-if echo "$output" | grep -q "gh image <file>"; then
-    print_pass "issue create surfaced the gh image tip"
+if echo "$output" | grep -q -- "--attach ./shot.png"; then
+    print_pass "issue create surfaced the --attach tip"
 else
     print_fail "issue create did not surface the tip. Got: $output"
 fi
 
-# Test 11: read-only commands do not get the tip
+# Test 7: on older gh the tip asks for an update instead
+print_test "Old gh turns the tip into an update hint"
+set_gh_version "2.98.0"
+output=$(run_ai pr create --repo testowner/testrepo --title t --body b 2>&1 || true)
+if echo "$output" | grep -q "2.99.0 or newer" && ! echo "$output" | grep -q -- "--attach ./shot.png"; then
+    print_pass "Old gh got the update hint"
+else
+    print_fail "Old gh tip wrong. Got: $output"
+fi
+
+# Test 8: read-only commands do not get the tip
 print_test "gh pr list does not show the tip"
+set_gh_version "2.99.0"
 output=$(run_ai pr list 2>&1 || true)
-if echo "$output" | grep -q "gh image <file>"; then
+if echo "$output" | grep -qi "attach"; then
     print_fail "pr list unexpectedly surfaced the tip. Got: $output"
 else
     print_pass "pr list stayed quiet"
@@ -393,9 +210,9 @@ fi
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
-    echo -e "${GREEN}All gh image tests passed!${NC}"
+    echo -e "${GREEN}All gh image retirement tests passed!${NC}"
     exit 0
 else
-    echo -e "${RED}$FAILURES gh image test(s) failed${NC}"
+    echo -e "${RED}$FAILURES gh image retirement test(s) failed${NC}"
     exit 1
 fi
